@@ -180,6 +180,18 @@ function cmdConfig(args) {
                     costPerMillionInput: 0,
                     costPerMillionOutput: 0,
                 },
+                minimax: {
+                    provider: 'minimax',
+                    model: 'MiniMax-M2.7',
+                    costPerMillionInput: 0.5,
+                    costPerMillionOutput: 1.8,
+                },
+                openrouter: {
+                    provider: 'openrouter',
+                    model: 'anthropic/claude-3.5-sonnet',
+                    costPerMillionInput: 3,
+                    costPerMillionOutput: 15,
+                },
             },
             evalModel: 'balanced',
             budget: { maxPerRun: 2.0, maxPerExperiment: 0.5, trackCosts: true },

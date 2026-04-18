@@ -1,4 +1,4 @@
-export type ModelProvider = 'openai' | 'anthropic' | 'ollama' | 'openrouter';
+export type ModelProvider = 'openai' | 'anthropic' | 'ollama' | 'openrouter' | 'minimax';
 export interface ModelConfig {
     provider: ModelProvider;
     model: string;

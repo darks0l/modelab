@@ -53,7 +53,13 @@ export async function callModel(config: ModelConfig, prompt: string): Promise<st
   if (config.provider === 'anthropic') {
     return callAnthropic(config, prompt, apiKey);
   }
-  // Default: OpenAI / OpenAI-compatible
+  if (config.provider === 'minimax') {
+    return callMinimax(config, prompt, apiKey);
+  }
+  if (config.provider === 'openrouter') {
+    return callOpenRouter(config, prompt, apiKey);
+  }
+  // Default: OpenAI
   return callOpenAI(config, prompt, apiKey);
 }
 
@@ -63,7 +69,17 @@ function getApiKey(provider: string): string {
     if (!k) throw new Error('ANTHROPIC_API_KEY not set');
     return k;
   }
-  // openai / openrouter
+  if (provider === 'minimax') {
+    const k = process.env.MINIMAX_API_KEY;
+    if (!k) throw new Error('MINIMAX_API_KEY not set');
+    return k;
+  }
+  if (provider === 'openrouter') {
+    const k = process.env.OPENROUTER_API_KEY ?? process.env.OPENAI_API_KEY;
+    if (!k) throw new Error('OPENROUTER_API_KEY or OPENAI_API_KEY not set');
+    return k;
+  }
+  // openai / openai-compatible
   const k = process.env.OPENAI_API_KEY;
   if (!k) throw new Error('OPENAI_API_KEY not set');
   return k;
@@ -149,4 +165,69 @@ async function callOllama(config: ModelConfig, prompt: string): Promise<string> 
 
   const json = await res.json() as { response: string };
   return json.response ?? '';
+}
+
+/**
+ * MiniMax API — https://api.minimax.chat
+ * Endpoint: POST /v1/text/chatcompletion_v2
+ * Auth: Bearer token (MINIMAX_API_KEY env var)
+ */
+async function callMinimax(config: ModelConfig, prompt: string, apiKey: string): Promise<string> {
+  const baseUrl = config.baseUrl ?? 'https://api.minimax.chat';
+
+  const res = await fetch(`${baseUrl}/v1/text/chatcompletion_v2`, {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${apiKey}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      model: config.model,
+      messages: [{ role: 'user', content: prompt }],
+      max_tokens: config.maxTokens ?? 1024,
+      temperature: config.temperature ?? 0,
+    }),
+  });
+
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`MiniMax API error ${res.status}: ${text}`);
+  }
+
+  const json = await res.json() as { choices?: Array<{ messages: Array<{ content: string }> }> };
+  const choice = json.choices?.[0];
+  return choice?.messages?.[0]?.content ?? '';
+}
+
+/**
+ * OpenRouter — https://openrouter.ai/api/v1
+ * Endpoint: POST /chat/completions
+ * Auth: Bearer token (OPENROUTER_API_KEY or OPENAI_API_KEY env var)
+ */
+async function callOpenRouter(config: ModelConfig, prompt: string, apiKey: string): Promise<string> {
+  const baseUrl = config.baseUrl ?? 'https://openrouter.ai/api/v1';
+
+  const res = await fetch(`${baseUrl}/chat/completions`, {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${apiKey}`,
+      'Content-Type': 'application/json',
+      'HTTP-Referer': 'https://github.com/darks0l/modelab',
+      'X-Title': 'modelab',
+    },
+    body: JSON.stringify({
+      model: config.model,
+      messages: [{ role: 'user', content: prompt }],
+      max_tokens: config.maxTokens ?? 1024,
+      temperature: config.temperature ?? 0,
+    }),
+  });
+
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`OpenRouter error ${res.status}: ${text}`);
+  }
+
+  const json = await res.json() as { choices: Array<{ message: { content: string } }> };
+  return json.choices[0]?.message?.content ?? '';
 }
