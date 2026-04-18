@@ -58,6 +58,8 @@ function defaultConfig() {
             groq: { provider: 'groq', model: 'llama-3.3-70b-versatile', costPerMillionInput: 0, costPerMillionOutput: 0 },
             gemini: { provider: 'gemini', model: 'gemini-2.0-flash', costPerMillionInput: 0, costPerMillionOutput: 0 },
             glm: { provider: 'glm', model: 'glm-4.7', costPerMillionInput: 0.1, costPerMillionOutput: 0.1 },
+            glm5: { provider: 'glm', model: 'glm-5-flash', costPerMillionInput: 0.1, costPerMillionOutput: 0.1 },
+            glm51: { provider: 'glm', model: 'glm-5.1-flash', costPerMillionInput: 0.1, costPerMillionOutput: 0.1 },
         },
         budget: { maxPerRun: 2.0, maxPerExperiment: 0.5, trackCosts: true },
         evalModel: 'balanced',
@@ -79,8 +81,9 @@ USAGE
   modelab config --init                   Create default config
   modelab config --list                   Show current config
   modelab cache --clear                   Clear the result cache
-  modelab route --task <text>             Show model routing decision
+  modelab route --task <text> [--mode quality|latency|cost]  Show model routing decision
   modelab lessons [--goal-id <id>]        Show what the system learned across runs
+  modelab report <run-id>                 Show full run report with lessons + latency
   modelab --help                          Show this help
 
 RUN OPTIONS
@@ -97,6 +100,12 @@ RUN OPTIONS
   --temperature-sweep <v> Comma-separated temperatures to sweep across (e.g. 0,0.3,0.7,1.0)
                            Each model arm expands into one arm per temperature value
 
+ROUTING MODES
+  modelab route --task <text> --mode latency
+                           Route for minimum latency (uses 'fast' model)
+  modelab route --task <text> --mode cost
+                           Route for minimum cost
+
 EXAMPLES
   modelab run --goal "What causes migraines?" --threshold 8
   modelab run --goal "Review my API design" --template code-review --arms balanced,coding
@@ -111,6 +120,7 @@ ENVIRONMENT
   GROQ_API_KEY          Groq models (free fast inference)
   GEMINI_API_KEY        Google Gemini models
   PERPLEXITY_API_KEY    Perplexity models
+  GLM_API_KEY          Zhipu GLM models (glm, glm5)
 `.trim());
 }
 // ── Commands ────────────────────────────────────────────────────────────────
@@ -614,9 +624,12 @@ function cmdExport(args) {
 }
 function cmdRoute(args) {
     const task = extractArg(args, '--task') ?? 'hello world';
+    const modeArg = extractArg(args, '--mode') ?? 'quality';
+    const mode = (['quality', 'latency', 'cost'].includes(modeArg) ? modeArg : 'quality');
     const config = loadConfig();
-    const routed = routeTask(task, config.models);
+    const routed = routeTask(task, config.models, mode);
     console.log(`\nTask: "${task}"`);
+    console.log(`Mode: ${mode}`);
     console.log(`Routed to: ${routed.model} (${routed.provider})`);
     console.log(`Reasoning: ${routed.reasoning}`);
 }
@@ -663,6 +676,9 @@ switch (subcommand) {
         break;
     case 'lessons':
         cmdLessons(subArgs);
+        break;
+    case 'report':
+        cmdReport(subArgs);
         break;
     case 'interactive':
         cmdInteractive();
@@ -781,6 +797,79 @@ async function readLine(prompt) {
             resolve(answer.trim());
         });
     });
+}
+// ── Report ─────────────────────────────────────────────────────────────────────
+/**
+ * Pretty-print a full run report — shows run summary, iteration lessons,
+ * latency breakdown, and per-arm results in a terminal-friendly format.
+ */
+async function cmdReport(args) {
+    const memory = new ExperimentMemory();
+    const runId = args.find(a => !a.startsWith('--'));
+    if (!runId) {
+        console.error('Usage: modelab report <run-id>');
+        memory.close();
+        process.exit(1);
+    }
+    const summary = memory.getRun(runId);
+    if (!summary) {
+        console.error(`❌ No run found with ID: ${runId}`);
+        console.error('Run: modelab history to see past runs.');
+        memory.close();
+        process.exit(1);
+    }
+    const latency = summary.latencyStats;
+    console.log('');
+    console.log(`\x1b[36m\x1b[1m🌑 Run Report — ${runId.slice(0, 8)}…\x1b[0m`);
+    console.log(`${'─'.repeat(70)}`);
+    console.log(`  Goal:       ${summary.goalId}`);
+    console.log(`  Status:     ${statusColor(summary.status)} ${summary.status}`);
+    console.log(`  Duration:   ${(summary.durationMs / 1000).toFixed(1)}s`);
+    console.log(`  Total cost: $${summary.totalCostUsd.toFixed(4)}`);
+    console.log(`  Arms:       ${summary.totalArms} | Iterations: ${summary.totalIterations}`);
+    if (latency.sampleCount > 0) {
+        console.log(`  TTFT:       avg ${latency.avgMs}ms · p50 ${latency.p50Ms}ms · p95 ${latency.p95Ms}ms (n=${latency.sampleCount})`);
+    }
+    if (summary.bestScore !== null) {
+        console.log(`  Best:       \x1b[33m\u2605 ${summary.bestScore}/10\x1b[0m \u2014 ${summary.bestArmId} (iteration ${summary.bestIteration ?? '?'})`);
+    }
+    console.log(`${'─'.repeat(70)}`);
+    if (summary.lesson) {
+        console.log('\n\x1b[1m💡 Experiment lesson:\x1b[0m');
+        console.log(`  ${summary.lesson}`);
+    }
+    if (summary.iterationSummaries.length > 0) {
+        console.log('\n\x1b[1m📝 Per-iteration lessons:\x1b[0m');
+        for (const s of summary.iterationSummaries) {
+            const scoreStr = s.bestScore !== null ? ` \x1b[33m\u2605 ${s.bestScore}/10\x1b[0m` : '';
+            console.log(`  Iteration ${s.iteration}${scoreStr} — ${s.bestArmId ?? '?'}: ${s.lesson}`);
+        }
+    }
+    // Per-arm results
+    const results = memory.getHistory(summary.goalId).filter(r => r.runId === runId);
+    if (results.length > 0) {
+        console.log(`\n\x1b[1m📊 Arms (${results.length}):\x1b[0m`);
+        const sorted = [...results].sort((a, b) => (b.score ?? 0) - (a.score ?? 0));
+        for (const r of sorted) {
+            const scoreStr = r.score !== null ? `\x1b[33m\u2605 ${r.score}/10\x1b[0m` : '  \u2014  ';
+            const cached = r.cached ? ' \x1b[2m[cached]\x1b[0m' : '';
+            const ttft = r.latencyMs > 0 ? ` · TTFT:${r.latencyMs}ms` : '';
+            const truncated = r.output.length > 120 ? r.output.slice(0, 120) + '…' : r.output;
+            console.log(`  ${r.armId}  ${scoreStr}  $${r.costUsd.toFixed(4)}${cached}${ttft}`);
+            console.log(`    ${truncated.replace(/\n/g, ' ')}`);
+        }
+    }
+    console.log(`${'─'.repeat(70)}\n`);
+    memory.close();
+}
+function statusColor(status) {
+    if (status.includes('quality'))
+        return '\x1b[32m✅\x1b[0m';
+    if (status.includes('budget'))
+        return '\x1b[33m💸\x1b[0m';
+    if (status === 'failed')
+        return '\x1b[31m❌\x1b[0m';
+    return '\x1b[32m🏁\x1b[0m';
 }
 // ── Helpers ───────────────────────────────────────────────────────────────────
 function extractArg(args, key) {

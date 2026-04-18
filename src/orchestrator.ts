@@ -1,6 +1,6 @@
 import type { ResearchGoal, RunLog, ExperimentResult, ModelConfig, ExperimentArm, ModelabConfig } from './types.js';
 import { routeTask, calcCost } from './router.js';
-import { callModelFull } from './evaluator.js';
+import { callModelFull, estimateTokens } from './evaluator.js';
 import { scoreOutput } from './scorer.js';
 import { ExperimentMemory, type IterationContext } from './memory.js';
 import { Cache } from './cache.js';
@@ -95,12 +95,26 @@ export class ResearchOrchestrator {
         // Batch arms by parallelism
         const batches = batchArray(expandedArms, this.parallelism);
         for (const batch of batches) {
-          // Pre-check: estimate total cost for this batch before spending anything
+          // Pre-check: estimate total cost for this batch before spending anything.
+          // Use actual token counts from prior iterations if available for this arm,
+          // otherwise fall back to a conservative estimate based on question length.
           const batchCostEstimate = batch.reduce((sum, arm) => {
             const cfg = this.models[arm.model];
             if (!cfg) return sum;
-            // Rough estimate: 1000 input + 500 output tokens at model's rate
-            return sum + calcCost(1000, 500, cfg);
+            // Use prior iteration token data if available for this arm
+            let priorResult = null;
+            if (typeof this.memory.getHistory === 'function') {
+              const history = this.memory.getHistory(goal.id);
+              priorResult = history
+                .filter(r => r.armId === arm.id)
+                .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())[0];
+            }
+            if (priorResult) {
+              return sum + calcCost(priorResult.tokensUsed.input, priorResult.tokensUsed.output, cfg);
+            }
+            // Conservative estimate: question tokens + 500 output
+            const inputEst = estimateTokens(goal.question);
+            return sum + calcCost(inputEst, 500, cfg);
           }, 0);
 
           if (this.budget.maxPerRun > 0 && totalCostUsd + batchCostEstimate > this.budget.maxPerRun) {
@@ -216,8 +230,10 @@ export class ResearchOrchestrator {
       }
     }
 
-    // Build prompt: if template lacks {{iteration_context}}, auto-prepend it so prior
-    // learnings are NEVER silently dropped — this is the cross-iteration memory fix.
+    // Build prompt:
+    // - If the template explicitly uses {{iteration_context}}, always inject it via variables
+    // - If it does NOT use {{iteration_context}} but we have prior context, auto-prepend so
+    //   learnings are NEVER silently dropped (cross-iteration memory fix)
     let effectiveTemplate = arm.promptTemplate;
     if (iterContext.contextString && !arm.promptTemplate.includes('{{iteration_context}}')) {
       effectiveTemplate =
@@ -229,6 +245,7 @@ export class ResearchOrchestrator {
       ...arm.variables,
       question: goal.question,
       goal: goal.goal,
+      // Always populate iteration_context so {{iteration_context}} always resolves
       iteration_context: iterContext.contextString,
     };
     const prompt = fillTemplate(effectiveTemplate, variables);

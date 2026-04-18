@@ -36,6 +36,7 @@ function openDb() {
       iteration    INTEGER NOT NULL,
       best_score   REAL,
       best_arm_id  TEXT,
+      best_latency_ms INTEGER,
       what_worked  TEXT  NOT NULL DEFAULT '',
       what_didnt_work TEXT  NOT NULL DEFAULT '',
       lesson       TEXT  NOT NULL DEFAULT '',
@@ -52,6 +53,8 @@ function openDb() {
       best_score   REAL,
       best_arm_id  TEXT,
       best_iteration INTEGER,
+      best_latency_ms INTEGER,
+      avg_latency_ms INTEGER NOT NULL DEFAULT 0,
       started_at   TEXT  NOT NULL,
       completed_at TEXT  NOT NULL,
       duration_ms  INTEGER NOT NULL DEFAULT 0,
@@ -108,22 +111,16 @@ export class ExperimentMemory {
             : this.db.prepare(sql).get());
         return row?.total ?? 0;
     }
-    /**
-     * Summarize what happened in a completed iteration and store it.
-     * Call this after each iteration completes (after all arms have run).
-     */
     summarize(runId, goalId, iteration, results) {
         const scored = results.filter(r => r.score !== null).sort((a, b) => (b.score ?? 0) - (a.score ?? 0));
         const best = scored[0] ?? null;
         const worst = scored[scored.length - 1] ?? null;
-        // Build what worked / didn't work strings
         const whatWorked = best && best.output
             ? best.output.slice(0, 500)
             : '';
         const whatDidntWork = worst && worst.output && worst.score !== null && worst.score < (best?.score ?? 10)
             ? worst.output.slice(0, 300)
             : '';
-        // Build lesson string
         let lesson = '';
         if (best && worst && best.score !== null && worst.score !== null) {
             const diff = best.score - worst.score;
@@ -140,7 +137,6 @@ export class ExperimentMemory {
         else if (best) {
             lesson = `Best so far: ${best.armId} at ${best.score}/10`;
         }
-        // Build full summary
         const summaryLines = [
             `## Iteration ${iteration} Summary`,
             `Best: ${best?.armId ?? 'none'} (${best?.score ?? 'N/A'}/10)`,
@@ -150,39 +146,31 @@ export class ExperimentMemory {
         ].filter(l => l);
         const summaryText = summaryLines.join('\n');
         const id = `sum-${runId}-${iteration}`;
+        // Best latency: fastest arm among scored results (or all if none scored)
+        const allArms = scored.length > 0 ? scored : results;
+        const bestLatencyArm = allArms
+            .filter(r => r.latencyMs > 0)
+            .sort((a, b) => a.latencyMs - b.latencyMs)[0] ?? null;
         const stmt = this.db.prepare(`
       INSERT OR REPLACE INTO iteration_summaries
-        (id, run_id, goal_id, iteration, best_score, best_arm_id,
+        (id, run_id, goal_id, iteration, best_score, best_arm_id, best_latency_ms,
          what_worked, what_didnt_work, lesson, summary_text, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
-        stmt.run(id, runId, goalId, iteration, best?.score ?? null, best?.armId ?? null, whatWorked, whatDidntWork, lesson, summaryText, new Date().toISOString());
+        stmt.run(id, runId, goalId, iteration, best?.score ?? null, best?.armId ?? null, bestLatencyArm?.latencyMs ?? null, whatWorked, whatDidntWork, lesson, summaryText, new Date().toISOString());
         return {
-            id,
-            runId,
-            goalId,
-            iteration,
+            id, runId, goalId, iteration,
             bestScore: best?.score ?? null,
             bestArmId: best?.armId ?? null,
-            whatWorked,
-            whatDidntWork,
-            lesson,
-            summaryText,
+            bestLatencyMs: bestLatencyArm?.latencyMs ?? null,
+            whatWorked, whatDidntWork, lesson, summaryText,
             createdAt: new Date().toISOString(),
         };
     }
-    /**
-     * Get all iteration summaries for a goal (across all runs).
-     */
     getSummaries(goalId) {
         const rows = this.db.prepare(`SELECT * FROM iteration_summaries WHERE goal_id = ? ORDER BY iteration ASC`).all(goalId);
         return rows.map(mapSummaryRow);
     }
-    /**
-     * Get the iteration context needed before starting iteration `iter`.
-     * This aggregates all prior iterations and formats them as a prompt string
-     * that can be injected as {{iteration_context}} into arm prompts.
-     */
     getContextForIteration(goalId, runId, iter) {
         const priorSummaries = this.getSummaries(goalId)
             .filter(s => s.runId === runId && s.iteration < iter);
@@ -206,10 +194,10 @@ export class ExperimentMemory {
                     return lines.join('\n');
                 }),
                 '',
-                `## Guidance for Next Iteration`,
+                '## Guidance for Next Iteration',
                 bestOverall
                     ? `So far the best approach is: ${bestOverall.armId} (${bestOverall.score}/10). Build on what worked and avoid what didn't.`
-                    : `No prior iterations with scored results yet.`,
+                    : 'No prior iterations with scored results yet.',
             ].join('\n');
         }
         return {
@@ -220,10 +208,6 @@ export class ExperimentMemory {
             contextString,
         };
     }
-    /**
-     * Get all "lessons" — the distilled takeaways across all goals/runs.
-     * Useful for the `modelab lessons` CLI command.
-     */
     getLessons(goalId) {
         const sql = goalId
             ? `SELECT goal_id, run_id, iteration, lesson, best_score FROM iteration_summaries WHERE goal_id = ? AND lesson != '' ORDER BY created_at ASC`
@@ -237,11 +221,6 @@ export class ExperimentMemory {
             bestScore: r.best_score,
         }));
     }
-    /**
-     * Summarize an entire run after it completes — aggregates all iteration summaries
-     * into a single run-level view. Stored in the run_summaries table.
-     * Call this once at the end of `orchestrator.run()`.
-     */
     summarizeRun(runId, goalId, status, startedAt, completedAt, allResults) {
         const iterationSummaries = this.getSummaries(goalId)
             .filter(s => s.runId === runId)
@@ -252,7 +231,6 @@ export class ExperimentMemory {
         const durationMs = allResults.reduce((max, r) => Math.max(max, r.durationMs), 0);
         const scored = allResults.filter(r => r.score !== null).sort((a, b) => (b.score ?? 0) - (a.score ?? 0));
         const bestResult = scored[0] ?? null;
-        // Build experiment-level lesson
         let lesson = '';
         if (iterationSummaries.length >= 2) {
             const improvements = iterationSummaries.filter(s => {
@@ -275,12 +253,12 @@ export class ExperimentMemory {
             lesson = s.lesson || `Single iteration run — best ${s.bestArmId ?? '?'} scored ${s.bestScore ?? 'N/A'}/10`;
         }
         else {
-            lesson = `No scored results in this run`;
+            lesson = 'No scored results in this run';
         }
-        // Build full run report
         const latencyStats = calcLatencyStats(allResults);
+        const avgLatencyMs = latencyStats.avgMs;
         const reportLines = [
-            `# Research Run Report`,
+            '# Research Run Report',
             `**Run ID:** ${runId}`,
             `**Goal:** ${goalId}`,
             `**Status:** ${status}`,
@@ -290,15 +268,15 @@ export class ExperimentMemory {
             `**Total Cost:** $${totalCostUsd.toFixed(4)}`,
             `**Arms run:** ${totalArms}`,
             `**Iterations:** ${totalIterations}`,
-            `**Best result:** ${bestResult?.armId ?? 'none'} (${bestResult?.score ?? 'N/A'}/10)`,
+            bestResult ? `**Best result:** ${bestResult.armId} (${bestResult.score ?? 'N/A'}/10)` : null,
             latencyStats.sampleCount > 0
                 ? `**TTFT latency:** avg ${latencyStats.avgMs}ms · p50 ${latencyStats.p50Ms}ms · p95 ${latencyStats.p95Ms}ms (n=${latencyStats.sampleCount})`
                 : null,
-            ``,
-            `## Experiment Lesson`,
+            '',
+            '## Experiment Lesson',
             lesson,
-            ``,
-            `## Per-Iteration Summaries`,
+            '',
+            '## Per-Iteration Summaries',
             ...iterationSummaries.map(s => [
                 `### Iteration ${s.iteration} — ${s.bestArmId ?? '?'} scored ${s.bestScore ?? 'N/A'}/10`,
                 `**Lesson:** ${s.lesson}`,
@@ -310,33 +288,21 @@ export class ExperimentMemory {
         const stmt = this.db.prepare(`
       INSERT OR REPLACE INTO run_summaries
         (run_id, goal_id, status, total_cost_usd, total_arms, total_iterations,
-         best_score, best_arm_id, best_iteration, started_at, completed_at, duration_ms,
+         best_score, best_arm_id, best_iteration, best_latency_ms, avg_latency_ms,
+         started_at, completed_at, duration_ms,
          lesson, report, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
-        stmt.run(runId, goalId, status, totalCostUsd, totalArms, totalIterations, bestResult?.score ?? null, bestResult?.armId ?? null, bestResult ? (allResults.indexOf(bestResult) + 1) : null, startedAt, completedAt, durationMs, lesson, report, new Date().toISOString());
+        stmt.run(runId, goalId, status, totalCostUsd, totalArms, totalIterations, bestResult?.score ?? null, bestResult?.armId ?? null, bestResult ? (allResults.indexOf(bestResult) + 1) : null, latencyStats.bestMs ?? null, avgLatencyMs, startedAt, completedAt, durationMs, lesson, report, new Date().toISOString());
         return {
-            runId,
-            goalId,
-            status,
-            totalCostUsd,
-            totalArms,
-            totalIterations,
+            runId, goalId, status, totalCostUsd, totalArms, totalIterations,
             bestScore: bestResult?.score ?? null,
             bestArmId: bestResult?.armId ?? null,
             bestIteration: bestResult ? (allResults.indexOf(bestResult) + 1) : null,
-            startedAt,
-            completedAt,
-            durationMs,
-            iterationSummaries,
-            lesson,
-            report,
-            latencyStats,
+            startedAt, completedAt, durationMs,
+            iterationSummaries, lesson, report, latencyStats, avgLatencyMs,
         };
     }
-    /**
-     * Get all run summaries, optionally filtered by goalId.
-     */
     getRunSummaries(goalId) {
         const sql = goalId
             ? `SELECT * FROM run_summaries WHERE goal_id = ? ORDER BY created_at DESC`
@@ -348,28 +314,17 @@ export class ExperimentMemory {
             const iterSummaries = this.getSummaries(r.goal_id).filter(s => s.runId === r.run_id);
             const latencyStats = this._latencyStatsForRun(r.run_id);
             return {
-                runId: r.run_id,
-                goalId: r.goal_id,
-                status: r.status,
-                totalCostUsd: r.total_cost_usd,
-                totalArms: r.total_arms,
+                runId: r.run_id, goalId: r.goal_id, status: r.status,
+                totalCostUsd: r.total_cost_usd, totalArms: r.total_arms,
                 totalIterations: r.total_iterations,
-                bestScore: r.best_score,
-                bestArmId: r.best_arm_id,
-                bestIteration: r.best_iteration,
-                startedAt: r.started_at,
-                completedAt: r.completed_at,
-                durationMs: r.duration_ms,
+                bestScore: r.best_score, bestArmId: r.best_arm_id, bestIteration: r.best_iteration,
+                startedAt: r.started_at, completedAt: r.completed_at, durationMs: r.duration_ms,
                 iterationSummaries: iterSummaries.sort((a, b) => a.iteration - b.iteration),
-                lesson: r.lesson,
-                report: r.report,
-                latencyStats,
+                lesson: r.lesson, report: r.report, latencyStats,
+                avgLatencyMs: r.avg_latency_ms,
             };
         });
     }
-    /**
-     * Get a single run summary by runId.
-     */
     getRun(runId) {
         const rows = this.db.prepare(`SELECT * FROM run_summaries WHERE run_id = ?`).all(runId);
         if (rows.length === 0)
@@ -378,33 +333,21 @@ export class ExperimentMemory {
         const iterSummaries = this.getSummaries(r.goal_id).filter(s => s.runId === r.run_id);
         const latencyStats = this._latencyStatsForRun(runId);
         return {
-            runId: r.run_id,
-            goalId: r.goal_id,
-            status: r.status,
-            totalCostUsd: r.total_cost_usd,
-            totalArms: r.total_arms,
+            runId: r.run_id, goalId: r.goal_id, status: r.status,
+            totalCostUsd: r.total_cost_usd, totalArms: r.total_arms,
             totalIterations: r.total_iterations,
-            bestScore: r.best_score,
-            bestArmId: r.best_arm_id,
-            bestIteration: r.best_iteration,
-            startedAt: r.started_at,
-            completedAt: r.completed_at,
-            durationMs: r.duration_ms,
+            bestScore: r.best_score, bestArmId: r.best_arm_id, bestIteration: r.best_iteration,
+            startedAt: r.started_at, completedAt: r.completed_at, durationMs: r.duration_ms,
             iterationSummaries: iterSummaries.sort((a, b) => a.iteration - b.iteration),
-            lesson: r.lesson,
-            report: r.report,
-            latencyStats,
+            lesson: r.lesson, report: r.report, latencyStats,
+            avgLatencyMs: r.avg_latency_ms,
         };
     }
-    /**
-     * Compute TTFT latency statistics for a specific run from the experiments table.
-     * Called when reconstructing RunSummary objects from storage.
-     */
     _latencyStatsForRun(runId) {
         const rows = this.db.prepare(`SELECT latency_ms FROM experiments WHERE run_id = ? AND latency_ms > 0`).all(runId);
         const latencies = rows.map(r => r.latency_ms);
         if (latencies.length === 0) {
-            return { avgMs: 0, p50Ms: 0, p95Ms: 0, minMs: 0, maxMs: 0, sampleCount: 0 };
+            return { avgMs: 0, p50Ms: 0, p95Ms: 0, minMs: 0, maxMs: 0, sampleCount: 0, bestMs: null, bestArmId: null };
         }
         const sorted = [...latencies].sort((a, b) => a - b);
         const n = sorted.length;
@@ -415,6 +358,8 @@ export class ExperimentMemory {
             minMs: sorted[0],
             maxMs: sorted[n - 1],
             sampleCount: n,
+            bestMs: null,
+            bestArmId: null,
         };
     }
     close() {
@@ -422,51 +367,44 @@ export class ExperimentMemory {
     }
 }
 function calcLatencyStats(results) {
-    const latencies = results
-        .map(r => r.latencyMs)
-        .filter(ms => ms > 0);
+    const latencies = results.map(r => r.latencyMs).filter(ms => ms > 0);
     if (latencies.length === 0) {
-        return { avgMs: 0, p50Ms: 0, p95Ms: 0, minMs: 0, maxMs: 0, sampleCount: 0 };
+        return { avgMs: 0, p50Ms: 0, p95Ms: 0, minMs: 0, maxMs: 0, sampleCount: 0, bestMs: null, bestArmId: null };
     }
     const sorted = [...latencies].sort((a, b) => a - b);
     const n = sorted.length;
     const avgMs = Math.round(latencies.reduce((s, v) => s + v, 0) / n);
     const p50Ms = sorted[Math.floor(n * 0.50)];
     const p95Ms = sorted[Math.floor(n * 0.95)];
-    return { avgMs, p50Ms, p95Ms, minMs: sorted[0], maxMs: sorted[n - 1], sampleCount: n };
+    const bestResult = results
+        .filter(r => r.latencyMs > 0)
+        .sort((a, b) => a.latencyMs - b.latencyMs)[0] ?? null;
+    return {
+        avgMs, p50Ms, p95Ms, minMs: sorted[0], maxMs: sorted[n - 1], sampleCount: n,
+        bestMs: bestResult?.latencyMs ?? null,
+        bestArmId: bestResult?.armId ?? null,
+    };
 }
 function armId(base) {
     return base.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 32);
 }
 function mapSummaryRow(r) {
     return {
-        id: r.id,
-        runId: r.run_id,
-        goalId: r.goal_id,
-        iteration: r.iteration,
-        bestScore: r.best_score,
-        bestArmId: r.best_arm_id,
-        whatWorked: r.what_worked,
-        whatDidntWork: r.what_didnt_work,
-        lesson: r.lesson,
-        summaryText: r.summary_text,
-        createdAt: r.created_at,
+        id: r.id, runId: r.run_id, goalId: r.goal_id, iteration: r.iteration,
+        bestScore: r.best_score, bestArmId: r.best_arm_id,
+        bestLatencyMs: r.best_latency_ms ?? null,
+        whatWorked: r.what_worked, whatDidntWork: r.what_didnt_work,
+        lesson: r.lesson, summaryText: r.summary_text, createdAt: r.created_at,
     };
 }
 function mapRow(r) {
     return {
-        armId: r.arm_id,
-        model: r.model,
-        output: r.output,
-        score: r.score ?? null,
-        costUsd: r.cost_usd,
+        armId: r.arm_id, model: r.model, output: r.output,
+        score: r.score ?? null, costUsd: r.cost_usd,
         tokensUsed: { input: r.input_tokens, output: r.output_tokens },
-        durationMs: r.duration_ms,
-        latencyMs: r.latency_ms ?? 0,
-        timestamp: r.timestamp,
-        iteration: r.iteration,
-        runId: r.run_id,
-        goalId: r.goal_id,
+        durationMs: r.duration_ms, latencyMs: r.latency_ms ?? 0,
+        timestamp: r.timestamp, iteration: r.iteration,
+        runId: r.run_id, goalId: r.goal_id,
     };
 }
 //# sourceMappingURL=memory.js.map

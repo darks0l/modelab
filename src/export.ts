@@ -65,6 +65,12 @@ function toMarkdown(log: RunLog, opts: ExportOptions): string {
   lines.push('');
 
   if (opts.includeScores !== false && log.allResults.length > 0) {
+    const latencies = log.allResults.map(r => r.latencyMs).filter(ms => ms > 0);
+    const sorted = [...latencies].sort((a, b) => a - b);
+    const avgTTFT = latencies.length > 0 ? Math.round(latencies.reduce((s, v) => s + v, 0) / latencies.length) : null;
+    const bestTTFT = sorted[0] ?? null;
+    const bestTTFTArm = bestTTFT !== null ? log.allResults.find(r => r.latencyMs === bestTTFT)?.armId ?? null : null;
+
     lines.push('## Results Summary');
     lines.push('');
     lines.push('| Arm | Score | Cost | Tokens | Duration | TTFT |');
@@ -75,6 +81,10 @@ function toMarkdown(log: RunLog, opts: ExportOptions): string {
       lines.push(`| ${r.armId}${cached} | ${r.score ?? 'N/A'} | $${r.costUsd.toFixed(4)} | ${r.tokensUsed.input + r.tokensUsed.output} | ${(r.durationMs / 1000).toFixed(1)}s | ${ttft} |`);
     }
     lines.push('');
+    if (avgTTFT !== null) {
+      lines.push(`**TTFT** — avg: ${avgTTFT}ms | fastest: ${bestTTFT}ms (${bestTTFTArm})`);
+      lines.push('');
+    }
   }
 
   if (log.bestResult) {

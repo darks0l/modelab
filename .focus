@@ -1,0 +1,14 @@
+CRITICAL FIX NEEDED: LCM Memory and Self-Iteration are BROKEN
+
+modelab is ABSOLUTELY supposed to remember, get better, and improve using LCM methodology. The X posts described the current broken state as if it were expected behavior — IT IS NOT. This must be fixed.
+
+BROKEN (per GLM audit):
+1. LCM-style memory: flat SQLite log, no hierarchical summarization, no token budget management
+2. Self-iteration: iterations are independent repeats, no learning between runs
+
+REQUIRED FIXES (priority order):
+1. LCM-style hierarchical memory — summarization + expansion + token budget management
+2. Self-iteration — LLM analyzes results → refined prompts for next iteration
+3. Cross-run learning — store what worked, apply it to future arms
+
+PUBLISH GATE: README/CHANGELOG must reflect all changes in this version cycle.
