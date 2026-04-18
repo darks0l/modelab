@@ -13,6 +13,8 @@ export interface ModelConfig {
   temperature?: number;
   /** Streaming callback — called with each chunk as it arrives */
   stream?: (chunk: string) => void;
+  /** Request JSON-mode response where supported (OpenAI, Anthropic, Groq, OpenRouter) */
+  jsonMode?: boolean;
 }
 
 export interface ModelabConfig {

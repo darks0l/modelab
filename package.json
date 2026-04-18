@@ -1,6 +1,6 @@
 {
   "name": "modelab",
-  "version": "0.2.3",
+  "version": "0.3.0",
   "description": "Autonomous AI research OS — run parallel experiments, compare models, export reports, learn from history",
   "type": "module",
   "main": "./dist/index.js",
@@ -8,14 +8,25 @@
   "bin": {
     "modelab": "./dist/cli.js"
   },
-
   "scripts": {
     "build": "tsc && node scripts/fix-bin.js",
     "test": "vitest run",
     "dev": "tsx src/cli.ts"
   },
-  "keywords": ["ai", "research", "agent", "llm", "openai", "anthropic"],
-  "files": ["dist", "bin", "README.md", "LICENSE"],
+  "keywords": [
+    "ai",
+    "research",
+    "agent",
+    "llm",
+    "openai",
+    "anthropic"
+  ],
+  "files": [
+    "dist",
+    "bin",
+    "README.md",
+    "LICENSE"
+  ],
   "license": "MIT",
   "homepage": "https://github.com/darks0l/modelab",
   "repository": {

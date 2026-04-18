@@ -1,5 +1,14 @@
+import { z } from 'zod';
 import type { ModelConfig } from './types.js';
 import { callModel } from './evaluator.js';
+
+const ScoreResultSchema = z.object({
+  score: z.number().min(0).max(10),
+  reasoning: z.string(),
+  clarity: z.number().min(0).max(3),
+  correctness: z.number().min(0).max(4),
+  completeness: z.number().min(0).max(3),
+});
 
 export interface ScoreResult {
   score: number;
@@ -11,7 +20,7 @@ export interface ScoreResult {
   error?: string | null;
 }
 
-const RUBRIC = `Score the following answer to the question.\n\nQuestion: {{question}}\n\nAnswer:\n{{answer}}\n\nYou are an impartial evaluator. Score on three dimensions:\n- Clarity (0-3): Is the answer clear, well-organized, and easy to follow?\n- Correctness (0-4): Is the answer factually/reasoningly sound?\n- Completeness (0-3): Does it fully address all parts of the question?\n\nRespond ONLY with a JSON object with this exact structure:\n{"score": <0-10>, "reasoning": "<1-2 sentences>", "clarity": <0-3>, "correctness": <0-4>, "completeness": <0-3>}\n\nReturn only the JSON. No markdown, no explanation.`;
+const RUBRIC = `Score the following answer to the question.\n\nQuestion: {{question}}\n\nAnswer:\n{{answer}}\n\nYou are an impartial evaluator. Score on three dimensions:\n- Clarity (0-3): Is the answer clear, well-organized, and easy to follow?\n- Correctness (0-4): Is the answer factually/reasoningly sound?\n- Completeness (0-3): Does it fully address all parts of the question?\n\nIMPORTANT: Respond ONLY with a valid JSON object. No markdown, no explanation, no text outside the JSON. The JSON must have this exact structure:\n{\n  "score": <0-10 number>,\n  "reasoning": "<1-2 sentence explanation>",\n  "clarity": <0-3 integer>,\n  "correctness": <0-4 integer>,\n  "completeness": <0-3 integer>\n}`;
 
 /** Score cache — pure function of (question + first 500 chars of output) */
 const scoreCache = new Map<string, ScoreResult>();
@@ -24,7 +33,8 @@ const scoreCache = new Map<string, ScoreResult>();
 export async function scoreOutput(
   output: string,
   question: string,
-  evalModel: ModelConfig
+  evalModel: ModelConfig,
+  maxRetries = 2
 ): Promise<ScoreResult> {
   // Cache key: hash of question + first 500 chars of output (stable, fast)
   const cacheKey = `${question}\x00${output.slice(0, 500)}`;
@@ -35,23 +45,46 @@ export async function scoreOutput(
     .replace('{{question}}', question)
     .replace('{{answer}}', output.length > 4000 ? output.slice(0, 4000) + '\n[truncated]' : output);
 
-  try {
-    const response = await callModel(evalModel, prompt);
-    const parsed = parseScoreResponse(response);
-    scoreCache.set(cacheKey, parsed);
-    return parsed;
-  } catch (err) {
-    const errorResult: ScoreResult = {
-      score: 0,
-      reasoning: 'Scoring unavailable',
-      clarity: 0,
-      correctness: 0,
-      completeness: 0,
-      error: err instanceof Error ? err.message : String(err),
-    };
-    scoreCache.set(cacheKey, errorResult);
-    return errorResult;
+  let lastError = '';
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      const response = await callModel(evalModel, prompt);
+      const parsed = parseScoreResponse(response);
+      // Validate with Zod
+      const validated = ScoreResultSchema.safeParse(parsed);
+      if (validated.success) {
+        scoreCache.set(cacheKey, parsed);
+        return parsed;
+      }
+      lastError = `Zod validation failed: ${validated.error.message}`;
+      // Add a hint to retry on parse failure
+      if (attempt < maxRetries) {
+        console.warn(`[modelab:scorer] Validation attempt ${attempt + 1} failed: ${lastError}. Retrying...`);
+      }
+    } catch (err) {
+      lastError = err instanceof Error ? err.message : String(err);
+    }
+
+    if (attempt < maxRetries) {
+      await sleep(500 * (attempt + 1));
+    }
   }
+
+  // All retries exhausted
+  const errorResult: ScoreResult = {
+    score: 0,
+    reasoning: `Scoring unavailable (validation failed after ${maxRetries + 1} attempts: ${lastError})`,
+    clarity: 0,
+    correctness: 0,
+    completeness: 0,
+    error: lastError,
+  };
+  scoreCache.set(cacheKey, errorResult);
+  return errorResult;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms));
 }
 
 export function clearScoreCache(): void {
@@ -64,8 +97,8 @@ export function getScoreCacheSize(): number {
 
 function parseScoreResponse(raw: string): ScoreResult {
   // Try to extract JSON from markdown code blocks or raw text
-  const jsonMatch = raw.match(/```json\s*(\{.*?\})\s*```|(\{.*?\})/s);
-  let jsonStr = jsonMatch ? (jsonMatch[1] ?? jsonMatch[2]) : raw;
+  const jsonMatch = raw.match(/```json\s*(\{[\s\S]*?\})\s*```|```\s*(\{[\s\S]*?\})\s*```|(\{[\s\S]*?\})/s);
+  let jsonStr = jsonMatch ? (jsonMatch[1] ?? jsonMatch[2] ?? jsonMatch[3]) : raw;
 
   // Try to find JSON object in the raw text
   const start = jsonStr.indexOf('{');
@@ -74,25 +107,12 @@ function parseScoreResponse(raw: string): ScoreResult {
     jsonStr = jsonStr.slice(start, end + 1);
   }
 
-  try {
-    const parsed = JSON.parse(jsonStr);
-    return {
-      score: Math.max(0, Math.min(10, Number(parsed.score) || 0)),
-      reasoning: String(parsed.reasoning ?? ''),
-      clarity: Math.max(0, Math.min(3, Number(parsed.clarity) || 0)),
-      correctness: Math.max(0, Math.min(4, Number(parsed.correctness) || 0)),
-      completeness: Math.max(0, Math.min(3, Number(parsed.completeness) || 0)),
-    };
-  } catch {
-    // Fallback: try to find a score number in the text
-    const scoreMatch = raw.match(/"score"\s*:\s*([0-9.]+)/);
-    const score = scoreMatch ? parseFloat(scoreMatch[1]) : 0;
-    return {
-      score: Math.max(0, Math.min(10, score)),
-      reasoning: raw.slice(0, 100),
-      clarity: 0,
-      correctness: 0,
-      completeness: 0,
-    };
-  }
+  const parsed = JSON.parse(jsonStr);
+  return {
+    score: Math.max(0, Math.min(10, Number(parsed.score) || 0)),
+    reasoning: String(parsed.reasoning ?? ''),
+    clarity: Math.max(0, Math.min(3, Number(parsed.clarity) || 0)),
+    correctness: Math.max(0, Math.min(4, Number(parsed.correctness) || 0)),
+    completeness: Math.max(0, Math.min(3, Number(parsed.completeness) || 0)),
+  };
 }

@@ -202,12 +202,12 @@ export class ResearchOrchestrator {
       throw new Error(`Arm "${arm.name}": cost $${costUsd.toFixed(4)} exceeds per-experiment cap`);
     }
 
-    // Score
+    // Score — always use JSON mode for deterministic structured output
     let score: number | null = null;
     let scoreError: string | null = null;
     const evalConfig = this.models[this.evalModelKey];
     if (evalConfig) {
-      const scoreResult = await scoreOutput(output, goal.question, evalConfig);
+      const scoreResult = await scoreOutput(output, goal.question, { ...evalConfig, jsonMode: true });
       score = scoreResult.score;
       scoreError = scoreResult.error ?? null;
     }

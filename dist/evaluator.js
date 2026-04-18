@@ -102,6 +102,7 @@ async function callOpenAI(cfg, prompt, apiKey) {
             messages: [{ role: 'user', content: prompt }],
             max_tokens: cfg.maxTokens ?? 512,
             temperature: cfg.temperature ?? 0,
+            ...(cfg.jsonMode ? { response_format: { type: 'json_object' } } : {}),
         }),
     });
     if (!res.ok)
@@ -118,7 +119,7 @@ async function streamOpenAI(cfg, baseUrl, model, apiKey, prompt) {
     const res = await fetchWithRetry(`${baseUrl}/chat/completions`, {
         method: 'POST',
         headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ model, messages: [{ role: 'user', content: prompt }], max_tokens: cfg.maxTokens ?? 512, temperature: cfg.temperature ?? 0, stream: true }),
+        body: JSON.stringify({ model, messages: [{ role: 'user', content: prompt }], max_tokens: cfg.maxTokens ?? 512, temperature: cfg.temperature ?? 0, stream: true, ...(cfg.jsonMode ? { response_format: { type: 'json_object' } } : {}) }),
     }, { timeoutMs: STREAM_TIMEOUT_MS });
     if (!res.ok)
         throw new Error(`OpenAI error ${res.status}`);
@@ -160,10 +161,13 @@ async function callAnthropic(cfg, prompt, apiKey) {
     const baseUrl = cfg.baseUrl ?? 'https://api.anthropic.com/v1';
     if (cfg.stream)
         return streamAnthropic(cfg, baseUrl, apiKey, prompt);
+    const body = { model: cfg.model, max_tokens: cfg.maxTokens ?? 1024, messages: [{ role: 'user', content: prompt }] };
+    if (cfg.jsonMode)
+        body.output = { text: { annotations: true }, content: [{ type: 'text', text: '' }] };
     const res = await fetchWithRetry(`${baseUrl}/messages`, {
         method: 'POST',
         headers: { 'x-api-key': apiKey, 'anthropic-version': '2023-06-01', 'Content-Type': 'application/json' },
-        body: JSON.stringify({ model: cfg.model, max_tokens: cfg.maxTokens ?? 1024, messages: [{ role: 'user', content: prompt }] }),
+        body: JSON.stringify(body),
     });
     if (!res.ok)
         throw new Error(`Anthropic error ${res.status}: ${await res.text()}`);
@@ -175,10 +179,11 @@ async function callAnthropic(cfg, prompt, apiKey) {
     };
 }
 async function streamAnthropic(cfg, baseUrl, apiKey, prompt) {
+    const body = { model: cfg.model, max_tokens: cfg.maxTokens ?? 1024, messages: [{ role: 'user', content: prompt }], stream: true };
     const res = await fetchWithRetry(`${baseUrl}/messages`, {
         method: 'POST',
         headers: { 'x-api-key': apiKey, 'anthropic-version': '2023-06-01', 'Content-Type': 'application/json' },
-        body: JSON.stringify({ model: cfg.model, max_tokens: cfg.maxTokens ?? 1024, messages: [{ role: 'user', content: prompt }], stream: true }),
+        body: JSON.stringify(body),
     }, { timeoutMs: STREAM_TIMEOUT_MS });
     if (!res.ok)
         throw new Error(`Anthropic error ${res.status}`);
@@ -238,7 +243,7 @@ async function callGroq(cfg, prompt, apiKey) {
     const res = await fetchWithRetry(`${baseUrl}/chat/completions`, {
         method: 'POST',
         headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ model: cfg.model, messages: [{ role: 'user', content: prompt }], max_tokens: cfg.maxTokens ?? 1024, temperature: cfg.temperature ?? 0 }),
+        body: JSON.stringify({ model: cfg.model, messages: [{ role: 'user', content: prompt }], max_tokens: cfg.maxTokens ?? 1024, temperature: cfg.temperature ?? 0, ...(cfg.jsonMode ? { response_format: { type: 'json_object' } } : {}) }),
     });
     if (!res.ok)
         throw new Error(`Groq error ${res.status}: ${await res.text()}`);
@@ -309,7 +314,7 @@ async function callOpenRouter(cfg, prompt, apiKey) {
     const res = await fetchWithRetry(`${baseUrl}/chat/completions`, {
         method: 'POST',
         headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json', 'HTTP-Referer': 'https://github.com/darks0l/modelab', 'X-Title': 'modelab' },
-        body: JSON.stringify({ model: cfg.model, messages: [{ role: 'user', content: prompt }], max_tokens: cfg.maxTokens ?? 1024, temperature: cfg.temperature ?? 0 }),
+        body: JSON.stringify({ model: cfg.model, messages: [{ role: 'user', content: prompt }], max_tokens: cfg.maxTokens ?? 1024, temperature: cfg.temperature ?? 0, ...(cfg.jsonMode ? { response_format: { type: 'json_object' } } : {}) }),
     });
     if (!res.ok)
         throw new Error(`OpenRouter error ${res.status}: ${await res.text()}`);
