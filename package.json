@@ -1,13 +1,14 @@
 {
   "name": "modelab",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Autonomous AI research OS — run parallel experiments, compare models, export reports, learn from history",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "bin": {
-    "modelab": "./bin/modelab"
+    "modelab": "./bin/modelab.js"
   },
+  "preferGlobal": true,
   "scripts": {
     "build": "tsc",
     "test": "vitest run",
