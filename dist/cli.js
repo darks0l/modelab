@@ -1,21 +1,28 @@
 #!/usr/bin/env node
-import { readFileSync, existsSync } from 'fs';
+import { readFileSync, existsSync, writeFileSync, mkdirSync } from 'fs';
 import { homedir } from 'os';
 import { join } from 'path';
 import { z } from 'zod';
 import { ResearchOrchestrator } from './orchestrator.js';
 import { ExperimentMemory } from './memory.js';
+import { Cache } from './cache.js';
 import { routeTask } from './router.js';
+import { getTemplate, listTemplates } from './templates.js';
+import { exportRun } from './export.js';
 const CONFIG_PATH = join(homedir(), '.modelab', 'config.json');
+const CACHE_TTL = 7 * 24 * 60 * 60 * 1000; // 7 days
+// ── Config Schema ──────────────────────────────────────────────────────────
+const ModelProviderEnum = z.enum(['openai', 'anthropic', 'ollama', 'openrouter', 'minimax', 'groq', 'gemini', 'perplexity']);
+const ModelConfigSchema = z.object({
+    provider: ModelProviderEnum,
+    model: z.string(),
+    baseUrl: z.string().optional(),
+    apiKey: z.string().optional(),
+    costPerMillionInput: z.number().optional().default(0),
+    costPerMillionOutput: z.number().optional().default(0),
+});
 const ConfigSchema = z.object({
-    models: z.record(z.object({
-        provider: z.enum(['openai', 'anthropic', 'ollama', 'openrouter']),
-        model: z.string(),
-        baseUrl: z.string().optional(),
-        apiKey: z.string().optional(),
-        costPerMillionInput: z.number().optional(),
-        costPerMillionOutput: z.number().optional(),
-    })),
+    models: z.record(ModelConfigSchema),
     budget: z.object({
         maxPerRun: z.number().default(2.0),
         maxPerExperiment: z.number().default(0.5),
@@ -27,73 +34,128 @@ const ConfigSchema = z.object({
 function loadConfig() {
     if (!existsSync(CONFIG_PATH)) {
         console.error(`Config not found at ${CONFIG_PATH}`);
-        console.error('Run: modelab config --init to create a default config');
+        console.error('Run: modelab config --init');
         process.exit(1);
     }
     const raw = JSON.parse(readFileSync(CONFIG_PATH, 'utf8'));
-    return ConfigSchema.parse(raw);
+    const parsed = ConfigSchema.parse(raw);
+    // Add defaults for missing fields
+    for (const [key, model] of Object.entries(parsed.models)) {
+        model.costPerMillionInput ??= 0;
+        model.costPerMillionOutput ??= 0;
+    }
+    return parsed;
 }
+// ── Default config ──────────────────────────────────────────────────────────
+function defaultConfig() {
+    return {
+        models: {
+            fast: { provider: 'openai', model: 'gpt-4o-mini', costPerMillionInput: 0.15, costPerMillionOutput: 0.60 },
+            balanced: { provider: 'anthropic', model: 'claude-sonnet-4-6', costPerMillionInput: 3, costPerMillionOutput: 15 },
+            reasoning: { provider: 'openai', model: 'o1', costPerMillionInput: 15, costPerMillionOutput: 60 },
+            coding: { provider: 'ollama', model: 'qwen3-coder', baseUrl: 'http://localhost:11434', costPerMillionInput: 0, costPerMillionOutput: 0 },
+            groq: { provider: 'groq', model: 'llama-3.3-70b-versatile', costPerMillionInput: 0, costPerMillionOutput: 0 },
+            gemini: { provider: 'gemini', model: 'gemini-2.0-flash', costPerMillionInput: 0, costPerMillionOutput: 0 },
+        },
+        budget: { maxPerRun: 2.0, maxPerExperiment: 0.5, trackCosts: true },
+        evalModel: 'balanced',
+        parallelism: 3,
+    };
+}
+// ── Help ────────────────────────────────────────────────────────────────────
 function printHelp() {
-    console.log(`modelab — autonomous research agent SDK
+    console.log(`
+🌑 modelab — AI research OS
 
-Usage:
-  modelab run --goal <text> [--iterations N] [--threshold N] [--arms N]
-               Run a research goal with N arms in parallel
+USAGE
+  modelab run --goal <text> [options]     Run a research experiment
+  modelab history                         Show experiment history
+  modelab best [--goal-id <id>]           Show best result
+  modelab templates                        List built-in prompt templates
+  modelab export <run-id> --format md     Export a past run
+  modelab config --init                   Create default config
+  modelab config --list                   Show current config
+  modelab cache --clear                   Clear the result cache
+  modelab route --task <text>             Show model routing decision
+  modelab --help                          Show this help
 
-  modelab history [--goal-id <id>]
-               Show experiment history from memory DB
+RUN OPTIONS
+  --goal <text>           Research question (required)
+  --iterations N          Max iterations (default: 3)
+  --threshold N           Quality threshold 0-10 (default: 7.0)
+  --arms <model1,model2>  Comma-separated model keys to use (default: first 2 models)
+  --template <id>         Use a built-in template (see: modelab templates)
+  --format json|md|html   Export format (default: md)
+  --output <path>         Write output to file
+  --no-cache              Disable result caching
+  --stream                Show tokens as they arrive
 
-  modelab best [--goal-id <id>]
-               Show best result for a goal
+EXAMPLES
+  modelab run --goal "What causes migraines?" --threshold 8
+  modelab run --goal "Review my API design" --template code-review --arms balanced,coding
+  modelab run --goal "Compare Postgres vs DynamoDB" --template compare --arms balanced,reasoning
+  modelab export run-abc123 --format html --output report.html
 
-  modelab config --init
-               Create default config at ${CONFIG_PATH}
-
-  modelab config --list
-               Show current config
-
-  modelab route --task <text>
-               Show which model would be routed for a task
-
-  modelab --help
-               Show this help
-
-Environment:
-  OPENAI_API_KEY      — used when model config has no apiKey
-  ANTHROPIC_API_KEY   — used for Anthropic models
-  OLLAMA_HOST         — defaults to http://localhost:11434
-`);
+ENVIRONMENT
+  OPENAI_API_KEY        OpenAI / Groq / OpenRouter models
+  ANTHROPIC_API_KEY     Anthropic models
+  MINIMAX_API_KEY       MiniMax models
+  GROQ_API_KEY          Groq models (free fast inference)
+  GEMINI_API_KEY        Google Gemini models
+  PERPLEXITY_API_KEY    Perplexity models
+`.trim());
 }
+// ── Commands ────────────────────────────────────────────────────────────────
 async function cmdRun(args) {
     const config = loadConfig();
     const memory = new ExperimentMemory();
-    let goalText = '';
-    let maxIterations = 3;
-    let qualityThreshold = 7.0;
-    let numArms = 2;
-    for (let i = 0; i < args.length; i++) {
-        if (args[i] === '--goal' && args[i + 1])
-            goalText = args[++i];
-        else if (args[i] === '--iterations' && args[i + 1])
-            maxIterations = parseInt(args[++i], 10);
-        else if (args[i] === '--threshold' && args[i + 1])
-            qualityThreshold = parseFloat(args[++i]);
-        else if (args[i] === '--arms' && args[i + 1])
-            numArms = parseInt(args[++i], 10);
-    }
+    const cache = !args.includes('--no-cache') ? new Cache(CACHE_TTL) : undefined;
+    // Parse args
+    const goalText = extractArg(args, '--goal') ?? '';
+    const maxIterations = parseInt(extractArg(args, '--iterations') ?? '3', 10);
+    const qualityThreshold = parseFloat(extractArg(args, '--threshold') ?? '7.0');
+    const templateId = extractArg(args, '--template');
+    const format = (extractArg(args, '--format') ?? 'md');
+    const outputPath = extractArg(args, '--output');
+    const useStream = args.includes('--stream');
     if (!goalText) {
-        console.error('--goal is required');
+        console.error('❌ --goal is required');
         process.exit(1);
     }
+    // Build arms
+    const armModels = extractArg(args, '--arms')?.split(',').map(s => s.trim()) ?? Object.keys(config.models).slice(0, 2);
+    const invalidModels = armModels.filter(m => !config.models[m]);
+    if (invalidModels.length > 0) {
+        console.error(`❌ Unknown models: ${invalidModels.join(', ')}. Available: ${Object.keys(config.models).join(', ')}`);
+        process.exit(1);
+    }
+    // Get template
+    let promptTemplate = `You are a research agent.
+
+Goal: {{goal}}
+Question: {{question}}
+
+Provide a thorough, well-reasoned, and comprehensive response.`;
+    let templateName = 'default';
+    if (templateId) {
+        const tmpl = getTemplate(templateId);
+        if (!tmpl) {
+            console.error(`❌ Unknown template: "${templateId}". Run: modelab templates`);
+            process.exit(1);
+        }
+        promptTemplate = tmpl.promptTemplate;
+        templateName = tmpl.name;
+    }
+    console.log(`\n🌑 modelab — ${templateName} mode`);
+    console.log(`   Question: ${goalText}`);
+    console.log(`   Models: ${armModels.join(', ')}`);
+    console.log(`   Threshold: ${qualityThreshold}/10 | Iterations: ${maxIterations}\n`);
     const goalId = `goal-${Date.now()}`;
-    const now = new Date().toISOString();
-    // Auto-generate arms from available models
-    const modelKeys = Object.keys(config.models);
-    const arms = modelKeys.slice(0, Math.min(numArms, modelKeys.length)).map((key, i) => ({
-        id: `${key}-arm-${i + 1}`,
-        name: `${key} strategy`,
-        promptTemplate: `You are a research agent. Your task:\n\nGoal: {{goal}}\n\nQuestion: {{question}}\n\nProvide a thorough, well-reasoned response.`,
-        model: key,
+    const arms = armModels.map((model, i) => ({
+        id: `${model}-arm-${i + 1}`,
+        name: `${model} (${config.models[model].provider})`,
+        promptTemplate,
+        model,
     }));
     const goal = {
         id: goalId,
@@ -103,23 +165,58 @@ async function cmdRun(args) {
         maxIterations,
         arms,
     };
+    // Streaming state
+    const activeStreams = new Map();
     const orchestrator = new ResearchOrchestrator({
         models: config.models,
         budget: config.budget,
         evalModel: config.evalModel,
         parallelism: config.parallelism,
         memory,
+        cache,
+        onStream: useStream
+            ? (armName, chunk) => {
+                const current = activeStreams.get(armName) ?? '';
+                const updated = current + chunk;
+                activeStreams.set(armName, updated);
+                // Print on newlines for cleaner output
+                if (chunk.includes('\n')) {
+                    process.stdout.write(`\r${' '.repeat(60)}\r`);
+                    console.log(`  │ ${armName}: ${updated.slice(-200)}`);
+                }
+            }
+            : undefined,
+        onProgress: (msg) => {
+            if (!useStream || !msg.startsWith('  🗃️') && !msg.startsWith('  ✅')) {
+                console.log(msg);
+            }
+        },
     });
-    console.log(`[modelab] Goal: ${goalText}`);
-    console.log(`[modelab] Arms: ${arms.map(a => a.name).join(', ')}`);
     const log = await orchestrator.run(goal);
-    console.log('\n=== RESULT ===');
-    console.log(`Status: ${log.status}`);
-    console.log(`Total cost: $${log.totalCostUsd.toFixed(4)}`);
+    // Print best result
     if (log.bestResult) {
-        console.log(`Best score: ${log.bestResult.score} (arm: ${log.bestResult.armId})`);
-        console.log(`Best output:\n${log.bestResult.output.slice(0, 500)}${log.bestResult.output.length > 500 ? '\n...' : ''}`);
+        console.log(`\n🏆 Best result: ${log.bestResult.armId} — score ${log.bestResult.score}/10`);
+        console.log(`\n${'─'.repeat(60)}`);
+        console.log(log.bestResult.output.slice(0, 800));
+        if (log.bestResult.output.length > 800)
+            console.log(`\n... (${log.bestResult.output.length - 800} more chars)`);
+        console.log(`${'─'.repeat(60)}\n`);
     }
+    // Export
+    if (format) {
+        const content = exportRun(log, {
+            format,
+            includeScores: true,
+            includeCost: true,
+            includeMetadata: true,
+        });
+        if (outputPath) {
+            writeFileSync(outputPath, content);
+            console.log(`📄 Exported to ${outputPath}`);
+        }
+    }
+    console.log(`💰 Total cost: $${log.totalCostUsd.toFixed(4)}`);
+    console.log(`🆔 Run ID: ${log.runId}`);
     memory.close();
 }
 async function cmdHistory(args) {
@@ -127,80 +224,65 @@ async function cmdHistory(args) {
     const goalId = extractArg(args, '--goal-id');
     const results = memory.getHistory(goalId ?? undefined);
     if (results.length === 0) {
-        console.log('No experiments found.');
+        console.log('No experiments found. Run: modelab run --goal "..."');
     }
     else {
-        console.log(`\n=== History (${results.length} results) ===`);
+        console.log(`\n📜 History (${Math.min(results.length, 20)} most recent)\n`);
+        const seen = new Set();
         for (const r of results.slice(0, 20)) {
-            console.log(`[${r.timestamp}] arm=${r.armId} score=${r.score ?? 'N/A'} cost=$${r.costUsd.toFixed(4)} tokens=${r.tokensUsed.input + r.tokensUsed.output}`);
-            console.log(`  ${r.output.slice(0, 120)}...`);
-            console.log('');
+            if (seen.has(r.runId))
+                continue;
+            seen.add(r.runId);
+            const time = new Date(r.timestamp).toLocaleString();
+            const scoreStr = r.score !== null ? `⭐ ${r.score}/10` : '—';
+            console.log(`  [${time}] ${r.goalId.slice(0, 20)} | ${r.armId} | ${scoreStr} | $${r.costUsd.toFixed(4)}`);
         }
+        console.log(`\n  Total experiments: ${results.length}`);
+        console.log(`  Total spend: $${results.reduce((s, r) => s + r.costUsd, 0).toFixed(4)}`);
     }
     memory.close();
 }
 async function cmdBest(args) {
     const memory = new ExperimentMemory();
-    const goalId = extractArg(args, '--goal-id') ?? 'last';
-    const best = memory.getBest(goalId);
-    if (!best) {
-        console.log('No best result found.');
+    const goalId = extractArg(args, '--goal-id');
+    if (!goalId) {
+        const all = memory.getHistory();
+        if (all.length === 0) {
+            console.log('No results.');
+            memory.close();
+            return;
+        }
+        // Find best overall
+        const best = all.reduce((b, r) => (r.score !== null && (!b || r.score > (b.score ?? 0)) ? r : b), all[0]);
+        printBest(best);
     }
     else {
-        console.log(`Best result (score=${best.score}):\n${best.output}`);
+        const best = memory.getBest(goalId);
+        if (!best) {
+            console.log(`No best result for "${goalId}".`);
+        }
+        else
+            printBest(best);
     }
     memory.close();
+    function printBest(r) {
+        console.log(`\n🏆 Best for "${r.armId}" — score ${r.score ?? 'N/A'}/10`);
+        console.log(`${'─'.repeat(60)}`);
+        console.log(r.output.slice(0, 1000));
+        if (r.output.length > 1000)
+            console.log(`\n... (${r.output.length - 1000} more chars)`);
+        console.log(`${'─'.repeat(60)}`);
+    }
 }
 function cmdConfig(args) {
     if (args.includes('--init')) {
-        const defaultConfig = {
-            models: {
-                fast: {
-                    provider: 'openai',
-                    model: 'gpt-4o-mini',
-                    costPerMillionInput: 0.15,
-                    costPerMillionOutput: 0.60,
-                },
-                balanced: {
-                    provider: 'anthropic',
-                    model: 'claude-sonnet-4-6',
-                    costPerMillionInput: 3,
-                    costPerMillionOutput: 15,
-                },
-                reasoning: {
-                    provider: 'openai',
-                    model: 'o1',
-                    costPerMillionInput: 15,
-                    costPerMillionOutput: 60,
-                },
-                coding: {
-                    provider: 'ollama',
-                    model: 'qwen3-coder',
-                    baseUrl: 'http://localhost:11434',
-                    costPerMillionInput: 0,
-                    costPerMillionOutput: 0,
-                },
-                minimax: {
-                    provider: 'minimax',
-                    model: 'MiniMax-M2.7',
-                    costPerMillionInput: 0.5,
-                    costPerMillionOutput: 1.8,
-                },
-                openrouter: {
-                    provider: 'openrouter',
-                    model: 'anthropic/claude-3.5-sonnet',
-                    costPerMillionInput: 3,
-                    costPerMillionOutput: 15,
-                },
-            },
-            evalModel: 'balanced',
-            budget: { maxPerRun: 2.0, maxPerExperiment: 0.5, trackCosts: true },
-            parallelism: 3,
-        };
-        const { mkdirSync, writeFileSync } = require('fs');
+        const cfg = defaultConfig();
         mkdirSync(join(homedir(), '.modelab'), { recursive: true });
-        writeFileSync(CONFIG_PATH, JSON.stringify(defaultConfig, null, 2));
-        console.log(`Default config written to ${CONFIG_PATH}`);
+        writeFileSync(CONFIG_PATH, JSON.stringify(cfg, null, 2));
+        console.log(`✅ Default config written to ${CONFIG_PATH}`);
+        console.log('\nEdit the config to add your API keys:');
+        console.log('  nano', CONFIG_PATH);
+        console.log('\nThen run: modelab run --goal "your question here"');
         return;
     }
     if (args.includes('--list')) {
@@ -210,18 +292,85 @@ function cmdConfig(args) {
     }
     printHelp();
 }
+function cmdTemplates(args) {
+    const templates = listTemplates();
+    console.log(`\n🌑 Built-in templates (${templates.length})\n`);
+    for (const t of templates) {
+        console.log(`  ${t.id.padEnd(16)} ${t.name}`);
+        console.log(`    ${t.description}`);
+        console.log(`    Models: ${t.recommendedModels?.join(', ') ?? 'any'}`);
+        console.log(`    Tags: ${t.tags?.join(', ')}`);
+        console.log('');
+    }
+    console.log('Use: modelab run --goal "..." --template <id>');
+}
+function cmdExport(args) {
+    const runId = args.find(a => !a.startsWith('--'));
+    const format = (extractArg(args, '--format') ?? 'md');
+    const outputPath = extractArg(args, '--output');
+    if (!runId) {
+        console.error('Usage: modelab export <run-id> [--format json|md|html] [--output <path>]');
+        process.exit(1);
+    }
+    const memory = new ExperimentMemory();
+    const results = memory.getHistory();
+    const runResults = results.filter(r => r.runId === runId);
+    if (runResults.length === 0) {
+        console.error(`❌ No run found with ID: ${runId}`);
+        console.error('Run: modelab history to see past runs.');
+        memory.close();
+        process.exit(1);
+    }
+    // Reconstruct RunLog
+    const { runId: _r0, goalId: _g0, ...first } = runResults[0];
+    const log = {
+        goalId: _g0,
+        runId,
+        status: 'completed',
+        startedAt: first.timestamp,
+        completedAt: runResults[runResults.length - 1].timestamp,
+        totalCostUsd: runResults.reduce((s, r) => s + r.costUsd, 0),
+        bestResult: runResults.reduce((b, r) => r.score !== null && (!b || r.score > (b.score ?? 0)) ? r : b, runResults[0]),
+        allResults: runResults,
+    };
+    const content = exportRun(log, {
+        format,
+        includeScores: true,
+        includeCost: true,
+        includeMetadata: true,
+        theme: 'dark',
+    });
+    if (outputPath) {
+        writeFileSync(outputPath, content);
+        console.log(`📄 Exported to ${outputPath}`);
+    }
+    else {
+        console.log(content);
+    }
+    memory.close();
+}
 function cmdRoute(args) {
     const task = extractArg(args, '--task') ?? 'hello world';
     const config = loadConfig();
     const routed = routeTask(task, config.models);
-    console.log(`Task: "${task}"`);
+    console.log(`\nTask: "${task}"`);
     console.log(`Routed to: ${routed.model} (${routed.provider})`);
+    console.log(`Reasoning: ${routed.reasoning}`);
 }
-function extractArg(args, key) {
-    const idx = args.indexOf(key);
-    return idx !== -1 ? args[idx + 1] : undefined;
+function cmdCache(args) {
+    if (args.includes('--clear')) {
+        const cache = new Cache();
+        const size = cache.size();
+        cache.clear();
+        console.log(`🗑️  Cleared ${size} cached entries.`);
+        return;
+    }
+    const cache = new Cache(CACHE_TTL);
+    console.log(`\n🗃️  Cache: ${cache.size()} entries`);
+    console.log(`   Location: ${join(homedir(), '.modelab', 'cache.json')}`);
+    console.log(`   TTL: 7 days\n`);
 }
-// ── Entry point ─────────────────────────────────────────────────
+// ── Entry point ────────────────────────────────────────────────────────────
 const subcommand = process.argv[2];
 const subArgs = process.argv.slice(3);
 switch (subcommand) {
@@ -237,8 +386,17 @@ switch (subcommand) {
     case 'config':
         cmdConfig(subArgs);
         break;
+    case 'templates':
+        cmdTemplates(subArgs);
+        break;
+    case 'export':
+        cmdExport(subArgs);
+        break;
     case 'route':
         cmdRoute(subArgs);
+        break;
+    case 'cache':
+        cmdCache(subArgs);
         break;
     case '--help':
     case '-h':
@@ -246,8 +404,12 @@ switch (subcommand) {
         printHelp();
         break;
     default:
-        console.error(`Unknown command: ${subcommand}`);
+        console.error(`❌ Unknown command: ${subcommand}`);
         printHelp();
         process.exit(1);
+}
+function extractArg(args, key) {
+    const idx = args.indexOf(key);
+    return idx !== -1 && idx + 1 < args.length ? args[idx + 1] : undefined;
 }
 //# sourceMappingURL=cli.js.map

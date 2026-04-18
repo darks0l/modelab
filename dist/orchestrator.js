@@ -1,6 +1,14 @@
 import { calcCost } from './router.js';
-import { evaluate, callModel } from './evaluator.js';
+import { callModelFull } from './evaluator.js';
+import { scoreOutput } from './scorer.js';
 import { ExperimentMemory } from './memory.js';
+import { Cache } from './cache.js';
+const SPINNERS = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+let spinnerIdx = 0;
+function spin(label) {
+    const s = SPINNERS[spinnerIdx++ % SPINNERS.length];
+    return `\r${s} ${label}`;
+}
 function uuid() {
     return crypto.randomUUID();
 }
@@ -10,12 +18,20 @@ export class ResearchOrchestrator {
     evalModelKey;
     parallelism;
     memory;
+    cache;
+    onStream;
+    onArmComplete;
+    onProgress;
     constructor(config) {
         this.models = config.models;
         this.budget = config.budget;
         this.evalModelKey = config.evalModel;
         this.parallelism = config.parallelism;
         this.memory = config.memory ?? new ExperimentMemory();
+        this.cache = config.cache;
+        this.onStream = config.onStream;
+        this.onArmComplete = config.onArmComplete;
+        this.onProgress = config.onProgress;
     }
     async run(goal) {
         const runId = uuid();
@@ -24,30 +40,27 @@ export class ResearchOrchestrator {
         const allResults = [];
         let bestResult;
         let status = 'running';
-        console.log(`[modelab] Starting run ${runId} for goal: ${goal.question}`);
-        console.log(`[modelab] Quality threshold: ${goal.qualityThreshold} | Max iterations: ${goal.maxIterations}`);
-        console.log(`[modelab] Arms: ${goal.arms.map(a => a.name).join(', ')}`);
+        this.progress(`Starting run ${runId.slice(0, 8)} — "${goal.question.slice(0, 60)}${goal.question.length > 60 ? '...' : ''}"`);
+        this.progress(`Threshold: ${goal.qualityThreshold} | Arms: ${goal.arms.length} | Max iterations: ${goal.maxIterations}`);
         try {
             for (let iter = 1; iter <= goal.maxIterations; iter++) {
-                console.log(`\n[modelab] === Iteration ${iter}/${goal.maxIterations} ===`);
-                // Check budget before starting iteration
+                this.progress(`\n── Iteration ${iter}/${goal.maxIterations} ──`);
                 if (this.budget.maxPerRun > 0 && totalCostUsd >= this.budget.maxPerRun) {
-                    console.log('[modelab] Budget exceeded before iteration — stopping');
+                    this.progress('Budget exceeded — stopping');
                     status = 'budget_exceeded';
                     break;
                 }
-                // Batch arms in groups of parallelism
+                // Batch arms by parallelism
                 const batches = batchArray(goal.arms, this.parallelism);
                 for (const batch of batches) {
                     if (this.budget.maxPerRun > 0 && totalCostUsd >= this.budget.maxPerRun) {
                         status = 'budget_exceeded';
                         break;
                     }
-                    // Run arms in parallel
-                    const armResults = await Promise.allSettled(batch.map(arm => this.runArm(arm, goal, iter)));
+                    const armResults = await Promise.allSettled(batch.map(arm => this.runArm(arm, goal, iter, runId)));
                     for (const result of armResults) {
                         if (result.status === 'rejected') {
-                            console.error('[modelab] Arm failed:', result.reason);
+                            console.error(`  ❌ ${result.reason}`);
                             continue;
                         }
                         const r = result.value;
@@ -57,26 +70,29 @@ export class ResearchOrchestrator {
                         if (r.score !== null && (!bestResult || r.score > (bestResult.score ?? -1))) {
                             bestResult = r;
                         }
-                        console.log(`[modelab] Arm "${r.armId}": score=${r.score ?? 'N/A'} cost=$${r.costUsd.toFixed(4)} tokens=${r.tokensUsed.input + r.tokensUsed.output}`);
+                        this.onArmComplete?.(r);
                     }
                 }
-                // Check if quality threshold reached
                 if (bestResult && bestResult.score !== null && bestResult.score >= goal.qualityThreshold) {
-                    console.log(`\n[modelab] Quality threshold reached: ${bestResult.score} >= ${goal.qualityThreshold}`);
-                    status = 'quality_receeded';
+                    this.progress(`\n✅ Quality threshold reached: ${bestResult.score} ≥ ${goal.qualityThreshold}`);
+                    status = 'quality_reached';
                     break;
                 }
             }
-            if (status === 'running') {
+            if (status === 'running')
                 status = 'completed';
-            }
         }
         catch (err) {
-            console.error('[modelab] Run failed:', err);
+            console.error(`\n❌ Run failed:`, err);
             status = 'failed';
         }
         const completedAt = new Date().toISOString();
-        console.log(`\n[modelab] Run ${runId} finished: ${status} | Total cost: $${totalCostUsd.toFixed(4)} | Duration: ${(Date.now() - startTime) / 1000}s`);
+        const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+        this.progress(`\n🏁 Run complete | ${status} | $${totalCostUsd.toFixed(4)} | ${elapsed}s`);
+        // Print comparison table
+        if (allResults.length > 1) {
+            this.printComparisonTable(allResults);
+        }
         return {
             goalId: goal.id,
             runId,
@@ -88,42 +104,63 @@ export class ResearchOrchestrator {
             allResults,
         };
     }
-    async runArm(arm, goal, iteration) {
+    async runArm(arm, goal, iteration, runId) {
         const startMs = Date.now();
         const modelConfig = this.models[arm.model];
         if (!modelConfig) {
-            throw new Error(`Unknown model key: "${arm.model}". Available: ${Object.keys(this.models).join(', ')}`);
+            throw new Error(`Unknown model: "${arm.model}". Available: ${Object.keys(this.models).join(', ')}`);
         }
-        // Fill prompt template
+        // Check cache
+        if (this.cache) {
+            const cached = this.cache.lookup(goal.question, arm.model, arm.id);
+            if (cached) {
+                this.progress(`  🗃️  ${arm.name}: cache hit — score ${cached.score}`);
+                return {
+                    ...cached,
+                    iteration,
+                    cached: true,
+                    runId,
+                    goalId: goal.id,
+                    durationMs: cached.durationMs ?? 0,
+                };
+            }
+        }
+        // Fill template
         const variables = { ...arm.variables, question: goal.question, goal: goal.goal };
         const prompt = fillTemplate(arm.promptTemplate, variables);
+        // Stream callback
+        let streamedOutput = '';
+        const streamCb = this.onStream
+            ? (chunk) => {
+                streamedOutput += chunk;
+                this.onStream(arm.name, chunk);
+            }
+            : undefined;
         let output;
         let inputTokens = 0;
         let outputTokens = 0;
         try {
-            const response = await callModel(modelConfig, prompt);
-            // Try to extract token usage from the response if available
-            // Note: callModel would need to return usage info — simplify for now
-            inputTokens = Math.round(prompt.length / 4); // rough estimate
-            outputTokens = Math.round(response.length / 4);
-            output = response;
+            const configWithStream = { ...modelConfig, stream: streamCb };
+            const result = await callModelFull(configWithStream, prompt);
+            output = result.output;
+            inputTokens = result.inputTokens;
+            outputTokens = result.outputTokens;
         }
         catch (err) {
-            throw new Error(`Model call failed for arm "${arm.id}": ${err}`);
+            throw new Error(`Arm "${arm.name}" failed: ${err}`);
         }
         const costUsd = calcCost(inputTokens, outputTokens, modelConfig);
-        // Check per-experiment budget
         if (this.budget.maxPerExperiment > 0 && costUsd > this.budget.maxPerExperiment) {
-            console.warn(`[modelab] Arm "${arm.id}" cost $${costUsd.toFixed(4)} exceeds per-experiment cap $${this.budget.maxPerExperiment} — skipping`);
-            throw new Error('Per-experiment budget exceeded');
+            throw new Error(`Arm "${arm.name}": cost $${costUsd.toFixed(4)} exceeds per-experiment cap`);
         }
-        // Evaluate
+        // Score
         let score = null;
         const evalConfig = this.models[this.evalModelKey];
         if (evalConfig) {
-            score = await evaluate(output, goal.question, evalConfig);
+            const scoreResult = await scoreOutput(output, goal.question, evalConfig);
+            score = scoreResult.score;
         }
-        return {
+        const result = {
             armId: arm.id,
             output,
             score,
@@ -132,19 +169,75 @@ export class ResearchOrchestrator {
             durationMs: Date.now() - startMs,
             timestamp: new Date().toISOString(),
             iteration,
+            cached: false,
+            runId,
+            goalId: goal.id,
         };
+        // Cache the result
+        if (this.cache && !result.cached) {
+            const key = Cache.hash(goal.question, arm.model, arm.id);
+            this.cache.set(key, result, goal.question);
+        }
+        const scoreStr = score !== null ? `${score}/10` : 'N/A';
+        const cachedStr = result.cached ? ' 🗃️' : '';
+        this.progress(`  ${result.cached ? '🗃️' : '✅'} ${arm.name}: ${scoreStr}${cachedStr} | $${result.costUsd.toFixed(4)} | ${inputTokens + outputTokens} tokens | ${(result.durationMs / 1000).toFixed(1)}s`);
+        return result;
+    }
+    printComparisonTable(results) {
+        const sorted = [...results].sort((a, b) => (b.score ?? 0) - (a.score ?? 0));
+        const maxOutputLen = 80;
+        console.log('\n┌' + '─'.repeat(78) + '┐');
+        console.log('│' + ' RESULTS COMPARISON '.padStart(40).padEnd(78) + '│');
+        console.log('├' + '─'.repeat(78) + '┤');
+        for (const r of sorted) {
+            const scoreStr = r.score !== null ? `⭐ ${r.score.toFixed(1)}/10` : '  —  ';
+            const cachedStr = r.cached ? ' [cached]' : '';
+            const header = ` ${r.armId}${cachedStr} ${scoreStr} $${r.costUsd.toFixed(4)}`;
+            const truncated = r.output.length > maxOutputLen ? r.output.slice(0, maxOutputLen) + '...' : r.output;
+            console.log('│' + header.padEnd(78) + '│');
+            // Word-wrap the output
+            const wrapped = wordWrap(truncated, 76);
+            for (const line of wrapped.slice(0, 4)) {
+                console.log('│  ' + line.padEnd(76) + '│');
+            }
+            console.log('├' + '─'.repeat(78) + '┤');
+        }
+        console.log('└' + '─'.repeat(78) + '┘');
+    }
+    progress(msg) {
+        if (this.onProgress) {
+            this.onProgress(msg);
+        }
+        else {
+            console.log(msg);
+        }
     }
 }
-// ── Utilities ────────────────────────────────────────────────────
 function batchArray(arr, size) {
     const batches = [];
-    for (let i = 0; i < arr.length; i += size) {
+    for (let i = 0; i < arr.length; i += size)
         batches.push(arr.slice(i, i + size));
-    }
     return batches;
 }
-/** Minimal mustache-style template fill: {{key}} → value */
 function fillTemplate(template, vars) {
     return template.replace(/\{\{(\w+)\}\}/g, (_, key) => vars[key] ?? `{{${key}}}`);
+}
+function wordWrap(text, width) {
+    const words = text.split(' ');
+    const lines = [];
+    let line = '';
+    for (const word of words) {
+        if ((line + ' ' + word).trim().length > width) {
+            if (line)
+                lines.push(line.trim());
+            line = word;
+        }
+        else {
+            line = (line + ' ' + word).trim();
+        }
+    }
+    if (line)
+        lines.push(line.trim());
+    return lines;
 }
 //# sourceMappingURL=orchestrator.js.map

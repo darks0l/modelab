@@ -1,7 +1,7 @@
 {
   "name": "modelab",
-  "version": "0.1.0",
-  "description": "Autonomous research agent SDK — iteratively explores questions with strategically routed AI models",
+  "version": "0.2.0",
+  "description": "Autonomous AI research OS — run parallel experiments, compare models, export reports, learn from history",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",

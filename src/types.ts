@@ -1,74 +1,115 @@
-// ── Model Providers ────────────────────────────────────────────────
-export type ModelProvider = 'openai' | 'anthropic' | 'ollama' | 'openrouter' | 'minimax';
+// ── Core Types ──────────────────────────────────────────────────────────────
+
+export type ModelProvider = 'openai' | 'anthropic' | 'ollama' | 'openrouter' | 'minimax' | 'groq' | 'gemini' | 'perplexity';
 
 export interface ModelConfig {
   provider: ModelProvider;
-  model: string; // e.g. 'gpt-4o', 'claude-sonnet-4-6', 'qwen3-coder'
-  /** Optional provider-specific base URL (e.g. for OpenRouter or local Ollama) */
+  model: string;
   baseUrl?: string;
-  /** Optional Bearer token. Falls back to OPENAI_API_KEY / ANTHROPIC_API_KEY env vars. */
   apiKey?: string;
+  costPerMillionInput: number;
+  costPerMillionOutput: number;
   maxTokens?: number;
   temperature?: number;
-  costPerMillionInput?: number;
-  costPerMillionOutput?: number;
+  /** Streaming callback — called with each chunk as it arrives */
+  stream?: (chunk: string) => void;
 }
 
-// ── Budget ───────────────────────────────────────────────────────
-export interface ModelBudget {
-  maxPerRun: number; // USD — hard cap for the entire run
-  maxPerExperiment: number; // USD — cap per single arm execution
-  trackCosts: boolean;
+export interface ModelabConfig {
+  models: Record<string, ModelConfig>;
+  budget: {
+    maxPerRun: number;
+    maxPerExperiment: number;
+    trackCosts: boolean;
+  };
+  evalModel: string;
+  parallelism: number;
+  cache?: {
+    enabled: boolean;
+    ttlMs?: number;
+  };
+  export?: {
+    defaultFormat: 'json' | 'md' | 'html';
+    outputDir?: string;
+  };
 }
 
-// ── Experiments ───────────────────────────────────────────────────
+// ── Experiment Types ─────────────────────────────────────────────────────────
+
+export interface ResearchGoal {
+  id: string;
+  question: string;
+  goal: string;
+  qualityThreshold: number;
+  maxIterations: number;
+  arms: ExperimentArm[];
+}
+
 export interface ExperimentArm {
   id: string;
   name: string;
-  /** Mustache-style template, e.g. "Research: {{question}}\n\nGoal: {{goal}}" */
+  /** Mustache-style template: {{question}}, {{goal}}, custom vars */
   promptTemplate: string;
-  /** Key into the models config, e.g. "balanced" */
-  model: string;
+  model: string; // key into models config
   variables?: Record<string, string>;
 }
 
 export interface ExperimentResult {
   armId: string;
   output: string;
-  /** 0–10 score from the evaluator */
   score: number | null;
   costUsd: number;
   tokensUsed: { input: number; output: number };
   durationMs: number;
   timestamp: string;
-  notes?: string;
   iteration: number;
-}
-
-export interface ResearchGoal {
-  id: string;
-  question: string;
-  goal: string; // what the agent should achieve
-  qualityThreshold: number; // minimum score to consider "done"
-  maxIterations: number;
-  arms: ExperimentArm[];
+  /** Whether this result came from cache */
+  cached?: boolean;
+  /** Run ID — always set when stored in memory */
+  runId: string;
+  /** Goal ID — always set when stored in memory */
+  goalId: string;
 }
 
 export interface RunLog {
   goalId: string;
   runId: string;
-  status: 'running' | 'completed' | 'budget_exceeded' | 'quality_receeded' | 'failed';
+  status: 'running' | 'completed' | 'quality_reached' | 'budget_exceeded' | 'failed';
   startedAt: string;
-  completedAt?: string;
+  completedAt: string;
   totalCostUsd: number;
-  bestResult?: ExperimentResult;
+  bestResult: ExperimentResult | undefined;
   allResults: ExperimentResult[];
+  /** Hash of the question — used for cache lookup */
+  questionHash?: string;
 }
 
-// ── Config ────────────────────────────────────────────────────────
-export interface ModelabConfig {
-  models: Record<string, ModelConfig>;
-  budget: ModelBudget;
-  evalModel: string; // key into models
-  parallelism: number; // max concurrent arms per iteration
+// ── Memory Types ─────────────────────────────────────────────────────────────
+
+export interface PersistedResult extends ExperimentResult {
+  runId: string;
+  goalId: string;
+}
+
+// ── Export Types ─────────────────────────────────────────────────────────────
+
+export type ExportFormat = 'json' | 'md' | 'html';
+
+export interface ExportOptions {
+  format: ExportFormat;
+  includeScores?: boolean;
+  includeCost?: boolean;
+  includeMetadata?: boolean;
+  theme?: 'light' | 'dark';
+}
+
+// ── Prompt Template Types ────────────────────────────────────────────────────
+
+export interface PromptTemplate {
+  id: string;
+  name: string;
+  description: string;
+  promptTemplate: string;
+  recommendedModels?: string[];
+  tags?: string[];
 }

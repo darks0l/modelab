@@ -24,7 +24,6 @@ export function estimateComplexity(task) {
 export function routeTask(task, modelConfigs) {
     const complexity = estimateComplexity(task);
     const keys = Object.keys(modelConfigs);
-    // Ordered preference list for each complexity tier
     const preferenceMap = {
         coding: ['coding', 'balanced', 'fast', 'reasoning'],
         reasoning: ['reasoning', 'balanced', 'fast'],
@@ -34,11 +33,11 @@ export function routeTask(task, modelConfigs) {
     const preferred = preferenceMap[complexity];
     for (const key of preferred) {
         if (keys.includes(key)) {
-            return modelConfigs[key];
+            return { model: modelConfigs[key].model, provider: modelConfigs[key].provider, reasoning: `${complexity} task → "${key}" (${modelConfigs[key].provider})` };
         }
     }
-    // Ultimate fallback: first configured model
-    return modelConfigs[keys[0]];
+    const first = keys[0];
+    return { model: modelConfigs[first].model, provider: modelConfigs[first].provider, reasoning: `fallback → "${first}"` };
 }
 /**
  * Calculate USD cost for a token usage report.

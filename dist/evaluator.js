@@ -1,64 +1,274 @@
-/**
- * Simple LLM judge — sends output + question to a configured eval model
- * and parses a 0–10 score from the response.
- *
- * Prompt: structured rubric asking the model to score on
- *   clarity (0–3), correctness (0–4), completeness (0–3)
- */
-export async function evaluate(output, question, evalModel) {
-    const prompt = `You are an impartial evaluator. Score the following answer to the question.
-
-Question: ${question}
-
-Answer:
-${output}
-
-Respond ONLY with a JSON object: {"score": <0-10>, "reasoning": "<1-sentence>"}
-Score rubric:
-- 0-3: clarity — is the answer clear and readable?
-- 0-4: correctness — is the answer factually/reasoningly sound?
-- 0-3: completeness — does it fully address the question?
-
-Return only the JSON. No markdown.`;
-    try {
-        const response = await callModel(evalModel, prompt);
-        const parsed = JSON.parse(response);
-        const score = Math.max(0, Math.min(10, parsed.score));
-        return Math.round(score * 10) / 10;
-    }
-    catch (err) {
-        console.warn('[modelab:evaluator] eval failed:', err);
-        return 0;
-    }
+export function estimateTokens(text) {
+    return Math.ceil(text.length / 4);
 }
 export async function callModel(config, prompt) {
-    const apiKey = config.apiKey ?? getApiKey(config.provider);
-    if (config.provider === 'ollama') {
-        return callOllama(config, prompt);
-    }
-    if (config.provider === 'anthropic') {
-        return callAnthropic(config, prompt, apiKey);
-    }
-    if (config.provider === 'minimax') {
-        return callMinimax(config, prompt, apiKey);
-    }
-    if (config.provider === 'openrouter') {
-        return callOpenRouter(config, prompt, apiKey);
-    }
-    // Default: OpenAI
-    return callOpenAI(config, prompt, apiKey);
+    const result = await callModelFull(config, prompt);
+    return result.output;
 }
-function getApiKey(provider) {
-    if (provider === 'anthropic') {
-        const k = process.env.ANTHROPIC_API_KEY;
-        if (!k)
-            throw new Error('ANTHROPIC_API_KEY not set');
-        return k;
+export async function callModelFull(config, prompt, apiKey) {
+    const key = apiKey ?? getApiKey(config.provider);
+    if (config.provider === 'ollama')
+        return callOllama(config, prompt);
+    if (config.provider === 'anthropic')
+        return callAnthropic(config, prompt, key);
+    if (config.provider === 'groq')
+        return callGroq(config, prompt, key);
+    if (config.provider === 'gemini')
+        return callGemini(config, prompt, key);
+    if (config.provider === 'perplexity')
+        return callPerplexity(config, prompt, key);
+    if (config.provider === 'minimax')
+        return callMinimax(config, prompt, key);
+    if (config.provider === 'openrouter')
+        return callOpenRouter(config, prompt, key);
+    return callOpenAI(config, prompt, key);
+}
+// ── OpenAI ─────────────────────────────────────────────────────────────────
+async function callOpenAI(config, prompt, apiKey) {
+    const baseUrl = config.baseUrl ?? 'https://api.openai.com/v1';
+    if (config.stream)
+        return streamOpenAI(config, baseUrl, config.model, apiKey, prompt);
+    const res = await fetch(`${baseUrl}/chat/completions`, {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            model: config.model,
+            messages: [{ role: 'user', content: prompt }],
+            max_tokens: config.maxTokens ?? 512,
+            temperature: config.temperature ?? 0,
+        }),
+    });
+    if (!res.ok)
+        throw new Error(`OpenAI error ${res.status}: ${await res.text()}`);
+    const json = await res.json();
+    return {
+        output: json.choices[0]?.message?.content ?? '',
+        inputTokens: json.usage?.prompt_tokens ?? estimateTokens(prompt),
+        outputTokens: json.usage?.completion_tokens ?? 0,
+        usage: json.usage,
+    };
+}
+async function streamOpenAI(cfg, baseUrl, model, apiKey, prompt) {
+    const res = await fetch(`${baseUrl}/chat/completions`, {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model, messages: [{ role: 'user', content: prompt }], max_tokens: cfg.maxTokens ?? 512, temperature: cfg.temperature ?? 0, stream: true }),
+    });
+    if (!res.ok)
+        throw new Error(`OpenAI error ${res.status}`);
+    if (!res.body)
+        throw new Error('No response body');
+    const reader = res.body.getReader();
+    const dec = new TextDecoder();
+    let output = '';
+    let done = false;
+    while (!done) {
+        const { value, done: d } = await reader.read();
+        done = d;
+        if (value) {
+            const chunk = dec.decode(value, { stream: !done });
+            for (const line of chunk.split('\n')) {
+                if (!line.startsWith('data: '))
+                    continue;
+                const data = line.slice(6).trim();
+                if (data === '[DONE]') {
+                    done = true;
+                    break;
+                }
+                try {
+                    const p = JSON.parse(data);
+                    const content = p.choices?.[0]?.delta?.content;
+                    if (content) {
+                        output += content;
+                        cfg.stream(content);
+                    }
+                }
+                catch { /* skip */ }
+            }
+        }
     }
-    if (provider === 'minimax') {
-        const k = process.env.MINIMAX_API_KEY;
+    return { output, inputTokens: estimateTokens(prompt), outputTokens: estimateTokens(output) };
+}
+// ── Anthropic ──────────────────────────────────────────────────────────────
+async function callAnthropic(config, prompt, apiKey) {
+    const baseUrl = config.baseUrl ?? 'https://api.anthropic.com/v1';
+    if (config.stream)
+        return streamAnthropic(config, baseUrl, apiKey, prompt);
+    const res = await fetch(`${baseUrl}/messages`, {
+        method: 'POST',
+        headers: { 'x-api-key': apiKey, 'anthropic-version': '2023-06-01', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model: config.model, max_tokens: config.maxTokens ?? 1024, messages: [{ role: 'user', content: prompt }] }),
+    });
+    if (!res.ok)
+        throw new Error(`Anthropic error ${res.status}: ${await res.text()}`);
+    const json = await res.json();
+    return {
+        output: json.content[0]?.text ?? '',
+        inputTokens: json.usage?.input_tokens ?? estimateTokens(prompt),
+        outputTokens: json.usage?.output_tokens ?? 0,
+    };
+}
+async function streamAnthropic(cfg, baseUrl, apiKey, prompt) {
+    const res = await fetch(`${baseUrl}/messages`, {
+        method: 'POST',
+        headers: { 'x-api-key': apiKey, 'anthropic-version': '2023-06-01', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model: cfg.model, max_tokens: cfg.maxTokens ?? 1024, messages: [{ role: 'user', content: prompt }], stream: true }),
+    });
+    if (!res.ok)
+        throw new Error(`Anthropic error ${res.status}`);
+    if (!res.body)
+        throw new Error('No response body');
+    const reader = res.body.getReader();
+    const dec = new TextDecoder();
+    let output = '';
+    let done = false;
+    while (!done) {
+        const { value, done: d } = await reader.read();
+        done = d;
+        if (value) {
+            const chunk = dec.decode(value, { stream: !done });
+            for (const line of chunk.split('\n')) {
+                if (!line.startsWith('data: '))
+                    continue;
+                const data = line.slice(6).trim();
+                if (data === '[DONE]') {
+                    done = true;
+                    break;
+                }
+                try {
+                    const p = JSON.parse(data);
+                    const text = p.type === 'content_block' && 'text' in p ? p.text : p.delta?.text;
+                    if (text) {
+                        output += text;
+                        cfg.stream(text);
+                    }
+                }
+                catch { /* skip */ }
+            }
+        }
+    }
+    return { output, inputTokens: estimateTokens(prompt), outputTokens: estimateTokens(output) };
+}
+// ── Ollama ────────────────────────────────────────────────────────────────
+async function callOllama(config, prompt) {
+    const baseUrl = config.baseUrl ?? 'http://localhost:11434';
+    const res = await fetch(`${baseUrl}/api/generate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model: config.model, prompt, stream: false, options: { temperature: config.temperature ?? 0.7, num_predict: config.maxTokens ?? 1024 } }),
+    });
+    if (!res.ok)
+        throw new Error(`Ollama error ${res.status}: ${await res.text()}`);
+    const json = await res.json();
+    return {
+        output: json.response ?? '',
+        inputTokens: json.prompt_eval_count ?? estimateTokens(prompt),
+        outputTokens: json.eval_count ?? estimateTokens(json.response ?? ''),
+    };
+}
+// ── Groq ──────────────────────────────────────────────────────────────────
+async function callGroq(config, prompt, apiKey) {
+    const baseUrl = config.baseUrl ?? 'https://api.groq.com/openai/v1';
+    const res = await fetch(`${baseUrl}/chat/completions`, {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model: config.model, messages: [{ role: 'user', content: prompt }], max_tokens: config.maxTokens ?? 1024, temperature: config.temperature ?? 0 }),
+    });
+    if (!res.ok)
+        throw new Error(`Groq error ${res.status}: ${await res.text()}`);
+    const json = await res.json();
+    return {
+        output: json.choices[0]?.message?.content ?? '',
+        inputTokens: json.usage?.prompt_tokens ?? estimateTokens(prompt),
+        outputTokens: json.usage?.completion_tokens ?? 0,
+        usage: json.usage,
+    };
+}
+// ── Gemini ────────────────────────────────────────────────────────────────
+async function callGemini(config, prompt, apiKey) {
+    const baseUrl = config.baseUrl ?? 'https://generativelanguage.googleapis.com/v1beta';
+    const model = config.model.startsWith('models/') ? config.model : `models/${config.model}`;
+    const res = await fetch(`${baseUrl}/${model}:generateContent?key=${apiKey}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }], generationConfig: { maxOutputTokens: config.maxTokens ?? 1024, temperature: config.temperature ?? 0 } }),
+    });
+    if (!res.ok)
+        throw new Error(`Gemini error ${res.status}: ${await res.text()}`);
+    const json = await res.json();
+    const output = json.candidates?.[0]?.content?.parts?.[0]?.text ?? '';
+    return {
+        output,
+        inputTokens: json.usageMetadata?.promptTokenCount ?? estimateTokens(prompt),
+        outputTokens: json.usageMetadata?.candidatesTokenCount ?? estimateTokens(output),
+    };
+}
+// ── Perplexity ────────────────────────────────────────────────────────────
+async function callPerplexity(config, prompt, apiKey) {
+    const baseUrl = config.baseUrl ?? 'https://api.perplexity.ai';
+    const res = await fetch(`${baseUrl}/chat/completions`, {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model: config.model, messages: [{ role: 'user', content: prompt }], max_tokens: config.maxTokens ?? 1024, temperature: config.temperature ?? 0 }),
+    });
+    if (!res.ok)
+        throw new Error(`Perplexity error ${res.status}: ${await res.text()}`);
+    const json = await res.json();
+    return {
+        output: json.choices[0]?.message?.content ?? '',
+        inputTokens: json.usage?.prompt_tokens ?? estimateTokens(prompt),
+        outputTokens: json.usage?.completion_tokens ?? 0,
+        usage: json.usage,
+    };
+}
+// ── MiniMax ──────────────────────────────────────────────────────────────
+async function callMinimax(config, prompt, apiKey) {
+    const baseUrl = config.baseUrl ?? 'https://api.minimax.chat';
+    const res = await fetch(`${baseUrl}/v1/text/chatcompletion_v2`, {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model: config.model, messages: [{ role: 'user', content: prompt }], max_tokens: config.maxTokens ?? 1024, temperature: config.temperature ?? 0 }),
+    });
+    if (!res.ok)
+        throw new Error(`MiniMax error ${res.status}: ${await res.text()}`);
+    const json = await res.json();
+    const output = json.choices?.[0]?.messages?.[0]?.content ?? '';
+    return { output, inputTokens: estimateTokens(prompt), outputTokens: estimateTokens(output) };
+}
+// ── OpenRouter ────────────────────────────────────────────────────────────
+async function callOpenRouter(config, prompt, apiKey) {
+    const baseUrl = config.baseUrl ?? 'https://openrouter.ai/api/v1';
+    if (config.stream)
+        return streamOpenAI(config, baseUrl, config.model, apiKey, prompt);
+    const res = await fetch(`${baseUrl}/chat/completions`, {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json', 'HTTP-Referer': 'https://github.com/darks0l/modelab', 'X-Title': 'modelab' },
+        body: JSON.stringify({ model: config.model, messages: [{ role: 'user', content: prompt }], max_tokens: config.maxTokens ?? 1024, temperature: config.temperature ?? 0 }),
+    });
+    if (!res.ok)
+        throw new Error(`OpenRouter error ${res.status}: ${await res.text()}`);
+    const json = await res.json();
+    return {
+        output: json.choices[0]?.message?.content ?? '',
+        inputTokens: json.usage?.prompt_tokens ?? estimateTokens(prompt),
+        outputTokens: json.usage?.completion_tokens ?? 0,
+        usage: json.usage,
+    };
+}
+// ── API Key resolution ────────────────────────────────────────────────────
+function getApiKey(provider) {
+    const env = {
+        anthropic: 'ANTHROPIC_API_KEY',
+        minimax: 'MINIMAX_API_KEY',
+        groq: 'GROQ_API_KEY',
+        gemini: 'GEMINI_API_KEY',
+        perplexity: 'PERPLEXITY_API_KEY',
+    };
+    const varName = env[provider];
+    if (varName) {
+        const k = process.env[varName];
         if (!k)
-            throw new Error('MINIMAX_API_KEY not set');
+            throw new Error(`${varName} not set`);
         return k;
     }
     if (provider === 'openrouter') {
@@ -67,137 +277,9 @@ function getApiKey(provider) {
             throw new Error('OPENROUTER_API_KEY or OPENAI_API_KEY not set');
         return k;
     }
-    // openai / openai-compatible
     const k = process.env.OPENAI_API_KEY;
     if (!k)
         throw new Error('OPENAI_API_KEY not set');
     return k;
-}
-async function callOpenAI(config, prompt, apiKey) {
-    const baseUrl = config.baseUrl ?? 'https://api.openai.com/v1';
-    const model = config.model.startsWith('anthropic/')
-        ? config.model.replace('anthropic/', '')
-        : config.model;
-    const res = await fetch(`${baseUrl}/chat/completions`, {
-        method: 'POST',
-        headers: {
-            'Authorization': `Bearer ${apiKey}`,
-            'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-            model,
-            messages: [{ role: 'user', content: prompt }],
-            max_tokens: config.maxTokens ?? 512,
-            temperature: config.temperature ?? 0,
-        }),
-    });
-    if (!res.ok) {
-        const text = await res.text();
-        throw new Error(`OpenAI API error ${res.status}: ${text}`);
-    }
-    const json = await res.json();
-    return json.choices[0]?.message?.content ?? '';
-}
-async function callAnthropic(config, prompt, apiKey) {
-    const baseUrl = config.baseUrl ?? 'https://api.anthropic.com/v1';
-    const model = config.model;
-    const res = await fetch(`${baseUrl}/messages`, {
-        method: 'POST',
-        headers: {
-            'x-api-key': apiKey,
-            'anthropic-version': '2023-06-01',
-            'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-            model,
-            max_tokens: config.maxTokens ?? 1024,
-            messages: [{ role: 'user', content: prompt }],
-        }),
-    });
-    if (!res.ok) {
-        const text = await res.text();
-        throw new Error(`Anthropic API error ${res.status}: ${text}`);
-    }
-    const json = await res.json();
-    return json.content[0]?.text ?? '';
-}
-async function callOllama(config, prompt) {
-    const baseUrl = config.baseUrl ?? 'http://localhost:11434';
-    const res = await fetch(`${baseUrl}/api/generate`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-            model: config.model,
-            prompt,
-            stream: false,
-            options: {
-                temperature: config.temperature ?? 0.7,
-                num_predict: config.maxTokens ?? 1024,
-            },
-        }),
-    });
-    if (!res.ok) {
-        const text = await res.text();
-        throw new Error(`Ollama error ${res.status}: ${text}`);
-    }
-    const json = await res.json();
-    return json.response ?? '';
-}
-/**
- * MiniMax API — https://api.minimax.chat
- * Endpoint: POST /v1/text/chatcompletion_v2
- * Auth: Bearer token (MINIMAX_API_KEY env var)
- */
-async function callMinimax(config, prompt, apiKey) {
-    const baseUrl = config.baseUrl ?? 'https://api.minimax.chat';
-    const res = await fetch(`${baseUrl}/v1/text/chatcompletion_v2`, {
-        method: 'POST',
-        headers: {
-            'Authorization': `Bearer ${apiKey}`,
-            'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-            model: config.model,
-            messages: [{ role: 'user', content: prompt }],
-            max_tokens: config.maxTokens ?? 1024,
-            temperature: config.temperature ?? 0,
-        }),
-    });
-    if (!res.ok) {
-        const text = await res.text();
-        throw new Error(`MiniMax API error ${res.status}: ${text}`);
-    }
-    const json = await res.json();
-    const choice = json.choices?.[0];
-    return choice?.messages?.[0]?.content ?? '';
-}
-/**
- * OpenRouter — https://openrouter.ai/api/v1
- * Endpoint: POST /chat/completions
- * Auth: Bearer token (OPENROUTER_API_KEY or OPENAI_API_KEY env var)
- */
-async function callOpenRouter(config, prompt, apiKey) {
-    const baseUrl = config.baseUrl ?? 'https://openrouter.ai/api/v1';
-    const res = await fetch(`${baseUrl}/chat/completions`, {
-        method: 'POST',
-        headers: {
-            'Authorization': `Bearer ${apiKey}`,
-            'Content-Type': 'application/json',
-            'HTTP-Referer': 'https://github.com/darks0l/modelab',
-            'X-Title': 'modelab',
-        },
-        body: JSON.stringify({
-            model: config.model,
-            messages: [{ role: 'user', content: prompt }],
-            max_tokens: config.maxTokens ?? 1024,
-            temperature: config.temperature ?? 0,
-        }),
-    });
-    if (!res.ok) {
-        const text = await res.text();
-        throw new Error(`OpenRouter error ${res.status}: ${text}`);
-    }
-    const json = await res.json();
-    return json.choices[0]?.message?.content ?? '';
 }
 //# sourceMappingURL=evaluator.js.map

@@ -1,8 +1,6 @@
-# modelab
+# modelab 🌑 — Autonomous AI Research OS
 
-**Autonomous research agent SDK** — iteratively explores questions with strategically routed AI models, parallel experiment arms, and self-evaluation.
-
-Given a research question, modelab runs parallel experiment arms across different models, scores each output, learns from history, and stops when quality or budget thresholds are hit. Built for internal DARKSOL tooling — the kind of agent that runs 3 strategies simultaneously, picks the best, and improves itself over time.
+**modelab** is a CLI and SDK for running parallel AI research experiments. Ask a question, spin up multiple model strategies simultaneously, score their outputs, cache results, export reports, and build on what you learn. Used internally at DARKSOL for systematic research.
 
 ---
 
@@ -10,75 +8,75 @@ Given a research question, modelab runs parallel experiment arms across differen
 
 ```bash
 npm install modelab
+modelab config --init   # creates ~/.modelab/config.json
 ```
 
 ---
 
 ## Quick Start
 
-### 1. Initialize config
-
 ```bash
-modelab config --init   # creates ~/.modelab/config.json
-# Edit the config to set your API keys and model preferences
-```
+# Ask a question, run 2 models in parallel, score results
+modelab run --goal "What causes migraines and how do the best treatments work?"
 
-### 2. Run a research goal
+# Use a built-in template
+modelab run --goal "Review my REST API design" --template code-review
 
-```bash
-modelab run --goal "What is the most efficient consensus algorithm for high-throughput L2 rollups?" --iterations 3 --threshold 7.5
-```
+# Compare specific models
+modelab run --goal "Explain ZK rollup economics" --arms balanced,reasoning
 
-Or use it as a library:
-
-```typescript
-import { ResearchOrchestrator } from 'modelab';
-
-const orchestrator = new ResearchOrchestrator({
-  models: {
-    balanced: { provider: 'anthropic', model: 'claude-sonnet-4-6', costPerMillionInput: 3, costPerMillionOutput: 15 },
-    reasoning: { provider: 'openai', model: 'o1', costPerMillionInput: 15, costPerMillionOutput: 60 },
-    fast: { provider: 'openai', model: 'gpt-4o-mini', costPerMillionInput: 0.15, costPerMillionOutput: 0.60 },
-  },
-  budget: { maxPerRun: 2.0, maxPerExperiment: 0.5, trackCosts: true },
-  evalModel: 'balanced',
-  parallelism: 3,
-});
-
-const log = await orchestrator.run({
-  id: 'my-goal-1',
-  question: 'What is the optimal block time for Ethereum L2s?',
-  goal: 'Provide a technically rigorous analysis',
-  qualityThreshold: 7.5,
-  maxIterations: 3,
-  arms: [
-    { id: 'arm-1', name: 'reasoning', model: 'reasoning', promptTemplate: '...' },
-    { id: 'arm-2', name: 'balanced',   model: 'balanced',   promptTemplate: '...' },
-  ],
-});
-
-console.log(log.bestResult);
+# Export to HTML report
+modelab run --goal "Compare Postgres vs DynamoDB for a startup" --format html --output report.html
 ```
 
 ---
 
-## Architecture
+## What's new in v0.2
 
-```
-ResearchOrchestrator
-  ├── router.ts      — routes tasks to best-fit model (heuristic complexity analysis)
-  ├── evaluator.ts   — LLM judge scores outputs 0–10 on rubric
-  ├── memory.ts      — SQLite experiment log (persists to ~/.modelab/memory.db)
-  └── orchestrator   — main loop: parallel arms → evaluate → log → iterate
+- **Streaming output** — watch tokens arrive in real-time with `--stream`
+- **Side-by-side comparison table** — all arms compared in one view
+- **Hash-based caching** — skip re-runs of the same question+model+arm
+- **Multi-format export** — `json`, `md`, `html` with dark/light themes
+- **8 model providers** — OpenAI, Anthropic, Ollama, Groq, Gemini, Perplexity, MiniMax, OpenRouter
+- **7 built-in templates** — research, code-review, architecture, bug-hunt, compare, quick-answer, creative
+- **Structured scorer** — rubric breakdown: clarity + correctness + completeness
+- **Persistent cache** — 7-day TTL, `modelab cache --clear` to wipe
+
+---
+
+## Built-in Templates
+
+| Template | Use case |
+|----------|----------|
+| `research` | Deep multi-perspective research |
+| `code-review` | Bugs, security, performance review |
+| `architecture` | System design and trade-offs |
+| `bug-hunt` | Adversarial failure-mode analysis |
+| `compare` | A/B decisions with scoring |
+| `quick-answer` | Fast, concise responses |
+| `creative` | Brainstorming and ideation |
+
+```bash
+modelab templates          # list all templates
+modelab run --goal "..." --template research
 ```
 
-**Loop per iteration:**
-1. Fan out arms in parallel (up to `parallelism` concurrent)
-2. Each arm: fill prompt template → call routed model → get output
-3. Evaluator scores each output against the research question
-4. Results logged to SQLite memory
-5. Check quality threshold → stop if reached
-6. Check budget → stop if exceeded
+---
+
+## CLI Commands
+
+```bash
+modelab run --goal "..." [--iterations N] [--threshold N] [--arms m1,m2] [--template id] [--format json|md|html] [--output path] [--stream] [--no-cache]
+                         Run a research experiment
+modelab history            Show experiment history with scores and costs
+modelab best [--goal-id]  Show best result for a goal
+modelab templates         List built-in prompt templates
+modelab export <run-id>   Re-export a past run to json/md/html
+modelab cache --clear     Clear the result cache
+modelab route --task "..."  Show model routing decision
+modelab config --init     Create ~/.modelab/config.json
+modelab config --list     Show current config
+```
 
 ---
 
@@ -89,10 +87,12 @@ ResearchOrchestrator
 ```json
 {
   "models": {
-    "fast":     { "provider": "openai",    "model": "gpt-4o-mini",       "costPerMillionInput": 0.15, "costPerMillionOutput": 0.60 },
-    "balanced": { "provider": "anthropic",  "model": "claude-sonnet-4-6", "costPerMillionInput": 3,    "costPerMillionOutput": 15 },
-    "reasoning":{ "provider": "openai",     "model": "o1",                 "costPerMillionInput": 15,   "costPerMillionOutput": 60 },
-    "coding":   { "provider": "ollama",     "model": "qwen3-coder",        "baseUrl": "http://localhost:11434", "costPerMillionInput": 0, "costPerMillionOutput": 0 }
+    "fast":      { "provider": "openai",   "model": "gpt-4o-mini",            "costPerMillionInput": 0.15,  "costPerMillionOutput": 0.60 },
+    "balanced":  { "provider": "anthropic", "model": "claude-sonnet-4-6",       "costPerMillionInput": 3,     "costPerMillionOutput": 15 },
+    "reasoning": { "provider": "openai",   "model": "o1",                      "costPerMillionInput": 15,    "costPerMillionOutput": 60 },
+    "coding":    { "provider": "ollama",    "model": "qwen3-coder",             "baseUrl": "http://localhost:11434" },
+    "groq":      { "provider": "groq",      "model": "llama-3.3-70b-versatile",  "costPerMillionInput": 0,     "costPerMillionOutput": 0 },
+    "gemini":    { "provider": "gemini",    "model": "gemini-2.0-flash",         "costPerMillionInput": 0,     "costPerMillionOutput": 0 }
   },
   "evalModel": "balanced",
   "budget": { "maxPerRun": 2.0, "maxPerExperiment": 0.5, "trackCosts": true },
@@ -100,52 +100,84 @@ ResearchOrchestrator
 }
 ```
 
-### Model routing
+---
 
-| Task type | Keywords | Preferred model |
-|-----------|----------|-----------------|
-| coding | code, refactor, bug, build, repo | `coding` > `balanced` |
-| reasoning | reason, proof, logic, analysis, theorem | `reasoning` > `balanced` |
-| quick | quick, small, summary, what is | `fast` > `balanced` |
-| default | — | `balanced` |
+## Model Routing
+
+Tasks are classified by keyword heuristics and routed to the best-fit model:
+
+| Task | Keywords | Routes to |
+|------|----------|-----------|
+| coding | code, refactor, bug, build, PR | `coding` |
+| reasoning | proof, logic, analysis, theorem | `reasoning` |
+| quick | quick, summary, what is, define | `fast` |
+| default | everything else | `balanced` |
+
+Override with `--arms fast,balanced` or configure explicitly.
 
 ---
 
-## CLI Commands
+## Use as a Library
 
-| Command | Description |
-|---------|-------------|
-| `modelab run --goal "..." [--iterations N] [--threshold N] [--arms N]` | Run research experiment |
-| `modelab history [--goal-id <id>]` | Show experiment history |
-| `modelab best [--goal-id <id>]` | Show best result for a goal |
-| `modelab config --init` | Create default config |
-| `modelab config --list` | Show current config |
-| `modelab route --task "..."` | Show model routing decision |
-| `modelab --help` | Show help |
+```typescript
+import { ResearchOrchestrator } from 'modelab';
+
+const orch = new ResearchOrchestrator({
+  models: {
+    balanced: { provider: 'anthropic', model: 'claude-sonnet-4-6', costPerMillionInput: 3, costPerMillionOutput: 15 },
+    reasoning: { provider: 'openai', model: 'o1', costPerMillionInput: 15, costPerMillionOutput: 60 },
+  },
+  budget: { maxPerRun: 2.0, maxPerExperiment: 0.5, trackCosts: true },
+  evalModel: 'balanced',
+  parallelism: 3,
+  onProgress: msg => console.log(msg),
+  onArmComplete: r => console.log(`Arm done: ${r.armId} → ${r.score}/10`),
+});
+
+const log = await orch.run({
+  id: 'my-goal',
+  question: 'What is the optimal block time for Ethereum L2s?',
+  goal: 'Provide a technically rigorous analysis',
+  qualityThreshold: 7.5,
+  maxIterations: 3,
+  arms: [
+    { id: 'arm-1', name: 'balanced', model: 'balanced', promptTemplate: '...' },
+    { id: 'arm-2', name: 'reasoning', model: 'reasoning', promptTemplate: '...' },
+  ],
+});
+
+console.log(log.bestResult);
+console.log(`Total cost: $${log.totalCostUsd}`);
+```
 
 ---
 
-## Features
+## Environment Variables
 
-- **Parallel experiment arms** — run multiple strategies simultaneously, pick the best
-- **Multi-model routing** — heuristic complexity routing across OpenAI / Anthropic / Ollama
-- **LLM self-evaluation** — structured rubric scoring (clarity + correctness + completeness)
-- **SQLite memory** — experiment history, best result lookup, average scores, total spend
-- **Budget guards** — per-run and per-experiment cost caps
-- **Quality gates** — stops early if threshold is reached
-- **Graceful degradation** — one arm failing doesn't kill the run
-- **Template variables** — `{{question}}`, `{{goal}}`, custom vars per arm
-- **Ollama support** — local models with zero API cost
+| Variable | Provider |
+|---------|---------|
+| `OPENAI_API_KEY` | OpenAI, Groq, OpenRouter, Perplexity |
+| `ANTHROPIC_API_KEY` | Anthropic |
+| `MINIMAX_API_KEY` | MiniMax |
+| `GROQ_API_KEY` | Groq (free fast tier) |
+| `GEMINI_API_KEY` | Google Gemini |
+| `PERPLEXITY_API_KEY` | Perplexity |
 
 ---
 
-## Environment variables
+## Architecture
 
-| Variable | Used for |
-|----------|----------|
-| `OPENAI_API_KEY` | OpenAI / OpenRouter models |
-| `ANTHROPIC_API_KEY` | Anthropic models |
-| `OLLAMA_HOST` | Ollama base URL (default: `http://localhost:11434`) |
+```
+ResearchOrchestrator
+  ├── router.ts      — complexity heuristic → best-fit model
+  ├── evaluator.ts   — streaming calls across 8 providers
+  ├── scorer.ts      — LLM judge: clarity + correctness + completeness
+  ├── orchestrator   — parallel arms, quality gate, budget guard
+  ├── memory.ts      — SQLite: ~/.modelab/memory.db
+  ├── cache.ts       — SHA-256 hash cache: ~/.modelab/cache.json
+  ├── templates.ts   — 7 built-in prompt templates
+  └── export.ts      — json / markdown / html reports
+```
 
 ---
 

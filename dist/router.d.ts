@@ -15,7 +15,11 @@ export declare function estimateComplexity(task: string): TaskComplexity;
  *
  * If the preferred key is missing, falls back to "balanced".
  */
-export declare function routeTask(task: string, modelConfigs: Record<string, ModelConfig>): ModelConfig;
+export declare function routeTask(task: string, modelConfigs: Record<string, ModelConfig>): {
+    model: string;
+    provider: string;
+    reasoning: string;
+};
 /**
  * Calculate USD cost for a token usage report.
  */
