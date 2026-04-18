@@ -9,7 +9,7 @@ Given a research question, modelab runs parallel experiment arms across differen
 ## Install
 
 ```bash
-npm install @darksol/modelab
+npm install modelab
 ```
 
 ---
@@ -32,7 +32,7 @@ modelab run --goal "What is the most efficient consensus algorithm for high-thro
 Or use it as a library:
 
 ```typescript
-import { ResearchOrchestrator } from '@darksol/modelab';
+import { ResearchOrchestrator } from 'modelab';
 
 const orchestrator = new ResearchOrchestrator({
   models: {
@@ -151,4 +151,4 @@ ResearchOrchestrator
 
 ## Built with teeth. 🌑
 
-MIT License © DARKSOL
+MIT License

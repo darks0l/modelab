@@ -1,5 +1,5 @@
 {
-  "name": "@darksol/modelab",
+  "name": "modelab",
   "version": "0.1.0",
   "description": "Autonomous research agent SDK — iteratively explores questions with strategically routed AI models",
   "type": "module",
@@ -14,6 +14,7 @@
     "dev": "tsx src/cli.ts"
   },
   "keywords": ["ai", "research", "agent", "llm", "openai", "anthropic"],
+  "files": ["dist", "bin", "README.md", "LICENSE"],
   "license": "MIT",
   "homepage": "https://github.com/darks0l/modelab",
   "repository": {
