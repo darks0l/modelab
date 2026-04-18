@@ -2,7 +2,7 @@ import type { ResearchGoal, RunLog, ExperimentResult, ModelConfig, ExperimentArm
 import { routeTask, calcCost } from './router.js';
 import { callModelFull } from './evaluator.js';
 import { scoreOutput } from './scorer.js';
-import { ExperimentMemory } from './memory.js';
+import { ExperimentMemory, type IterationContext } from './memory.js';
 import { Cache } from './cache.js';
 
 export interface OrchestratorConfig extends Omit<ModelabConfig, 'cache' | 'export'> {
@@ -62,15 +62,29 @@ export class ResearchOrchestrator {
     this.progress(`Starting run ${runId.slice(0, 8)} — "${goal.question.slice(0, 60)}${goal.question.length > 60 ? '...' : ''}"`);
     this.progress(`Threshold: ${goal.qualityThreshold} | Arms: ${goal.arms.length} | Max iterations: ${goal.maxIterations}`);
 
+    // Expand temperature-sweep arms into per-temperature sub-arms
+    const expandedArms = goal.arms.flatMap(arm => {
+      if (arm.temperatureSweep && arm.temperatureSweep.length > 0) {
+        return arm.temperatureSweep.map(temp => ({
+          ...arm,
+          id: `${arm.id}_t${temp}`.replace('.', '_'),
+          name: `${arm.name} (T=${temp})`,
+          temperature: temp,
+          temperatureSweep: undefined, // expanded, no longer needed
+        }));
+      }
+      return [arm];
+    });
+
     try {
       for (let iter = 1; iter <= goal.maxIterations; iter++) {
-        // Cross-iteration learning: pull context from prior iterations
+        // Cross-iteration learning: pull context ONCE per iteration (not per-arm)
         const iterContext = this.memory.getContextForIteration(goal.id, runId, iter);
         if (iterContext.contextString) {
           this.progress(`\n📚 Prior context loaded (${iterContext.priorIterations.length} prior iteration${iterContext.priorIterations.length !== 1 ? 's' : ''}, best so far: ${iterContext.bestScoreSoFar !== null ? iterContext.bestScoreSoFar + '/10' : 'N/A'})`);
         }
 
-        this.progress(`\n── Iteration ${iter}/${goal.maxIterations} ──`);
+        this.progress(`\n── Iteration ${iter}/${goal.maxIterations} (${expandedArms.length} arms after expansion) ──`);
 
         if (this.budget.maxPerRun > 0 && totalCostUsd >= this.budget.maxPerRun) {
           this.progress('Budget exceeded — stopping');
@@ -79,7 +93,7 @@ export class ResearchOrchestrator {
         }
 
         // Batch arms by parallelism
-        const batches = batchArray(goal.arms, this.parallelism);
+        const batches = batchArray(expandedArms, this.parallelism);
         for (const batch of batches) {
           // Pre-check: estimate total cost for this batch before spending anything
           const batchCostEstimate = batch.reduce((sum, arm) => {
@@ -96,7 +110,7 @@ export class ResearchOrchestrator {
           }
 
           const armResults = await Promise.allSettled(
-            batch.map(arm => this.runArm(arm, goal, iter, runId))
+            batch.map(arm => this.runArm(arm, goal, iter, runId, iterContext))
           );
 
           for (const result of armResults) {
@@ -147,11 +161,22 @@ export class ResearchOrchestrator {
       this.printComparisonTable(allResults);
     }
 
+    // Store run-level summary so the full experiment story is preserved
+    const startedAtIso = new Date(startTime).toISOString();
+    this.memory.summarizeRun(
+      runId,
+      goal.id,
+      status,
+      startedAtIso,
+      completedAt,
+      allResults
+    );
+
     return {
       goalId: goal.id,
       runId,
       status,
-      startedAt: new Date(startTime).toISOString(),
+      startedAt: startedAtIso,
       completedAt,
       totalCostUsd: Math.round(totalCostUsd * 1e6) / 1e6,
       bestResult,
@@ -159,7 +184,13 @@ export class ResearchOrchestrator {
     };
   }
 
-  private async runArm(arm: ExperimentArm, goal: ResearchGoal, iteration: number, runId: string): Promise<ExperimentResult> {
+  private async runArm(
+    arm: ExperimentArm,
+    goal: ResearchGoal,
+    iteration: number,
+    runId: string,
+    iterContext: IterationContext,
+  ): Promise<ExperimentResult> {
     const startMs = Date.now();
     let latencyMs = 0; // Time-to-first-token (TTFT)
     const modelConfig = this.models[arm.model];
@@ -185,17 +216,22 @@ export class ResearchOrchestrator {
       }
     }
 
-    // Get cross-iteration context for this arm's iteration
-    const iterContext = this.memory.getContextForIteration(goal.id, runId, iteration);
+    // Build prompt: if template lacks {{iteration_context}}, auto-prepend it so prior
+    // learnings are NEVER silently dropped — this is the cross-iteration memory fix.
+    let effectiveTemplate = arm.promptTemplate;
+    if (iterContext.contextString && !arm.promptTemplate.includes('{{iteration_context}}')) {
+      effectiveTemplate =
+        `## Prior Research Context\n${iterContext.contextString}\n\n` +
+        `## Your Task\n${arm.promptTemplate}`;
+    }
 
-    // Fill template — arms can use {{iteration_context}} to see what prior iterations learned
     const variables = {
       ...arm.variables,
       question: goal.question,
       goal: goal.goal,
       iteration_context: iterContext.contextString,
     };
-    const prompt = fillTemplate(arm.promptTemplate, variables);
+    const prompt = fillTemplate(effectiveTemplate, variables);
 
     // Stream callback — tracks time-to-first-token
     let streamedOutput = '';
@@ -297,6 +333,16 @@ export class ResearchOrchestrator {
         console.log('│  ' + line.padEnd(76) + '│');
       }
       console.log('├' + '─'.repeat(78) + '┤');
+    }
+    // Latency stats footer
+    const latencies = results.map(r => r.latencyMs).filter(ms => ms > 0);
+    if (latencies.length > 0) {
+      const sorted = [...latencies].sort((a, b) => a - b);
+      const n = sorted.length;
+      const avgMs = Math.round(sorted.reduce((s, v) => s + v, 0) / n);
+      const p50Ms = sorted[Math.floor(n * 0.50)];
+      const p95Ms = sorted[Math.floor(n * 0.95)];
+      console.log('│' + ' TTFT latency  avg:' + String(avgMs).padStart(5) + 'ms  p50:' + String(p50Ms).padStart(5) + 'ms  p95:' + String(p95Ms).padStart(5) + 'ms'.padEnd(70) + '│');
     }
     console.log('└' + '─'.repeat(78) + '┘');
   }

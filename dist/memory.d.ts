@@ -18,6 +18,36 @@ export interface IterationSummary {
     summaryText: string;
     createdAt: string;
 }
+export interface RunLatencyStats {
+    avgMs: number;
+    p50Ms: number;
+    p95Ms: number;
+    minMs: number;
+    maxMs: number;
+    sampleCount: number;
+}
+export interface RunSummary {
+    runId: string;
+    goalId: string;
+    status: string;
+    totalCostUsd: number;
+    totalArms: number;
+    totalIterations: number;
+    bestScore: number | null;
+    bestArmId: string | null;
+    bestIteration: number | null;
+    startedAt: string;
+    completedAt: string;
+    durationMs: number;
+    /** Per-iteration summaries for this run */
+    iterationSummaries: IterationSummary[];
+    /** Key experiment-level lesson */
+    lesson: string;
+    /** Full run report text */
+    report: string;
+    /** TTFT latency statistics across all arms */
+    latencyStats: RunLatencyStats;
+}
 export interface IterationContext {
     iteration: number;
     priorIterations: IterationSummary[];
@@ -60,6 +90,25 @@ export declare class ExperimentMemory {
         lesson: string;
         bestScore: number | null;
     }[];
+    /**
+     * Summarize an entire run after it completes — aggregates all iteration summaries
+     * into a single run-level view. Stored in the run_summaries table.
+     * Call this once at the end of `orchestrator.run()`.
+     */
+    summarizeRun(runId: string, goalId: string, status: string, startedAt: string, completedAt: string, allResults: ExperimentResult[]): RunSummary;
+    /**
+     * Get all run summaries, optionally filtered by goalId.
+     */
+    getRunSummaries(goalId?: string): RunSummary[];
+    /**
+     * Get a single run summary by runId.
+     */
+    getRun(runId: string): RunSummary | null;
+    /**
+     * Compute TTFT latency statistics for a specific run from the experiments table.
+     * Called when reconstructing RunSummary objects from storage.
+     */
+    private _latencyStatsForRun;
     close(): void;
 }
 //# sourceMappingURL=memory.d.ts.map

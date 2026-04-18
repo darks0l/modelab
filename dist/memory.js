@@ -42,6 +42,23 @@ function openDb() {
       summary_text TEXT  NOT NULL DEFAULT '',
       created_at   TEXT  NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS run_summaries (
+      run_id       TEXT  NOT NULL PRIMARY KEY,
+      goal_id      TEXT  NOT NULL,
+      status       TEXT  NOT NULL,
+      total_cost_usd REAL NOT NULL DEFAULT 0,
+      total_arms   INTEGER NOT NULL DEFAULT 0,
+      total_iterations INTEGER NOT NULL DEFAULT 0,
+      best_score   REAL,
+      best_arm_id  TEXT,
+      best_iteration INTEGER,
+      started_at   TEXT  NOT NULL,
+      completed_at TEXT  NOT NULL,
+      duration_ms  INTEGER NOT NULL DEFAULT 0,
+      lesson       TEXT  NOT NULL DEFAULT '',
+      report       TEXT  NOT NULL DEFAULT '',
+      created_at   TEXT  NOT NULL
+    );
     CREATE INDEX IF NOT EXISTS idx_goal_id ON experiments(goal_id);
     CREATE INDEX IF NOT EXISTS idx_run_id  ON experiments(run_id);
     CREATE INDEX IF NOT EXISTS idx_arm_id  ON experiments(arm_id);
@@ -220,9 +237,203 @@ export class ExperimentMemory {
             bestScore: r.best_score,
         }));
     }
+    /**
+     * Summarize an entire run after it completes — aggregates all iteration summaries
+     * into a single run-level view. Stored in the run_summaries table.
+     * Call this once at the end of `orchestrator.run()`.
+     */
+    summarizeRun(runId, goalId, status, startedAt, completedAt, allResults) {
+        const iterationSummaries = this.getSummaries(goalId)
+            .filter(s => s.runId === runId)
+            .sort((a, b) => a.iteration - b.iteration);
+        const totalCostUsd = allResults.reduce((s, r) => s + r.costUsd, 0);
+        const totalArms = allResults.length;
+        const totalIterations = iterationSummaries.length;
+        const durationMs = allResults.reduce((max, r) => Math.max(max, r.durationMs), 0);
+        const scored = allResults.filter(r => r.score !== null).sort((a, b) => (b.score ?? 0) - (a.score ?? 0));
+        const bestResult = scored[0] ?? null;
+        // Build experiment-level lesson
+        let lesson = '';
+        if (iterationSummaries.length >= 2) {
+            const improvements = iterationSummaries.filter(s => {
+                const prev = iterationSummaries[s.iteration - 2];
+                return prev && s.bestScore !== null && prev.bestScore !== null && s.bestScore > prev.bestScore;
+            });
+            if (improvements.length > 0) {
+                const lastImproved = improvements[improvements.length - 1];
+                lesson = `Score improved over ${improvements.length} iteration(s) — last improvement at iteration ${lastImproved.iteration} (${lastImproved.bestScore}/10)`;
+            }
+            else if (bestResult && bestResult.score !== null && bestResult.score >= 8) {
+                lesson = `Achieved quality threshold with best score ${bestResult.score}/10 from ${bestResult.armId}`;
+            }
+            else {
+                lesson = `Ran ${totalIterations} iterations, best score ${bestResult?.score ?? 'N/A'}/10 — consider adjusting prompts or models`;
+            }
+        }
+        else if (iterationSummaries.length === 1) {
+            const s = iterationSummaries[0];
+            lesson = s.lesson || `Single iteration run — best ${s.bestArmId ?? '?'} scored ${s.bestScore ?? 'N/A'}/10`;
+        }
+        else {
+            lesson = `No scored results in this run`;
+        }
+        // Build full run report
+        const latencyStats = calcLatencyStats(allResults);
+        const reportLines = [
+            `# Research Run Report`,
+            `**Run ID:** ${runId}`,
+            `**Goal:** ${goalId}`,
+            `**Status:** ${status}`,
+            `**Started:** ${startedAt}`,
+            `**Completed:** ${completedAt}`,
+            `**Duration:** ${(durationMs / 1000).toFixed(1)}s`,
+            `**Total Cost:** $${totalCostUsd.toFixed(4)}`,
+            `**Arms run:** ${totalArms}`,
+            `**Iterations:** ${totalIterations}`,
+            `**Best result:** ${bestResult?.armId ?? 'none'} (${bestResult?.score ?? 'N/A'}/10)`,
+            latencyStats.sampleCount > 0
+                ? `**TTFT latency:** avg ${latencyStats.avgMs}ms · p50 ${latencyStats.p50Ms}ms · p95 ${latencyStats.p95Ms}ms (n=${latencyStats.sampleCount})`
+                : null,
+            ``,
+            `## Experiment Lesson`,
+            lesson,
+            ``,
+            `## Per-Iteration Summaries`,
+            ...iterationSummaries.map(s => [
+                `### Iteration ${s.iteration} — ${s.bestArmId ?? '?'} scored ${s.bestScore ?? 'N/A'}/10`,
+                `**Lesson:** ${s.lesson}`,
+                s.whatWorked ? `**What worked:** ${s.whatWorked.slice(0, 300)}` : '',
+                s.whatDidntWork ? `**What didn't work:** ${s.whatDidntWork.slice(0, 200)}` : '',
+            ].filter(Boolean).join('\n')),
+        ].filter(Boolean);
+        const report = reportLines.join('\n');
+        const stmt = this.db.prepare(`
+      INSERT OR REPLACE INTO run_summaries
+        (run_id, goal_id, status, total_cost_usd, total_arms, total_iterations,
+         best_score, best_arm_id, best_iteration, started_at, completed_at, duration_ms,
+         lesson, report, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+        stmt.run(runId, goalId, status, totalCostUsd, totalArms, totalIterations, bestResult?.score ?? null, bestResult?.armId ?? null, bestResult ? (allResults.indexOf(bestResult) + 1) : null, startedAt, completedAt, durationMs, lesson, report, new Date().toISOString());
+        return {
+            runId,
+            goalId,
+            status,
+            totalCostUsd,
+            totalArms,
+            totalIterations,
+            bestScore: bestResult?.score ?? null,
+            bestArmId: bestResult?.armId ?? null,
+            bestIteration: bestResult ? (allResults.indexOf(bestResult) + 1) : null,
+            startedAt,
+            completedAt,
+            durationMs,
+            iterationSummaries,
+            lesson,
+            report,
+            latencyStats,
+        };
+    }
+    /**
+     * Get all run summaries, optionally filtered by goalId.
+     */
+    getRunSummaries(goalId) {
+        const sql = goalId
+            ? `SELECT * FROM run_summaries WHERE goal_id = ? ORDER BY created_at DESC`
+            : `SELECT * FROM run_summaries ORDER BY created_at DESC`;
+        const rows = (goalId
+            ? this.db.prepare(sql).all(goalId)
+            : this.db.prepare(sql).all());
+        return rows.map(r => {
+            const iterSummaries = this.getSummaries(r.goal_id).filter(s => s.runId === r.run_id);
+            const latencyStats = this._latencyStatsForRun(r.run_id);
+            return {
+                runId: r.run_id,
+                goalId: r.goal_id,
+                status: r.status,
+                totalCostUsd: r.total_cost_usd,
+                totalArms: r.total_arms,
+                totalIterations: r.total_iterations,
+                bestScore: r.best_score,
+                bestArmId: r.best_arm_id,
+                bestIteration: r.best_iteration,
+                startedAt: r.started_at,
+                completedAt: r.completed_at,
+                durationMs: r.duration_ms,
+                iterationSummaries: iterSummaries.sort((a, b) => a.iteration - b.iteration),
+                lesson: r.lesson,
+                report: r.report,
+                latencyStats,
+            };
+        });
+    }
+    /**
+     * Get a single run summary by runId.
+     */
+    getRun(runId) {
+        const rows = this.db.prepare(`SELECT * FROM run_summaries WHERE run_id = ?`).all(runId);
+        if (rows.length === 0)
+            return null;
+        const r = rows[0];
+        const iterSummaries = this.getSummaries(r.goal_id).filter(s => s.runId === r.run_id);
+        const latencyStats = this._latencyStatsForRun(runId);
+        return {
+            runId: r.run_id,
+            goalId: r.goal_id,
+            status: r.status,
+            totalCostUsd: r.total_cost_usd,
+            totalArms: r.total_arms,
+            totalIterations: r.total_iterations,
+            bestScore: r.best_score,
+            bestArmId: r.best_arm_id,
+            bestIteration: r.best_iteration,
+            startedAt: r.started_at,
+            completedAt: r.completed_at,
+            durationMs: r.duration_ms,
+            iterationSummaries: iterSummaries.sort((a, b) => a.iteration - b.iteration),
+            lesson: r.lesson,
+            report: r.report,
+            latencyStats,
+        };
+    }
+    /**
+     * Compute TTFT latency statistics for a specific run from the experiments table.
+     * Called when reconstructing RunSummary objects from storage.
+     */
+    _latencyStatsForRun(runId) {
+        const rows = this.db.prepare(`SELECT latency_ms FROM experiments WHERE run_id = ? AND latency_ms > 0`).all(runId);
+        const latencies = rows.map(r => r.latency_ms);
+        if (latencies.length === 0) {
+            return { avgMs: 0, p50Ms: 0, p95Ms: 0, minMs: 0, maxMs: 0, sampleCount: 0 };
+        }
+        const sorted = [...latencies].sort((a, b) => a - b);
+        const n = sorted.length;
+        return {
+            avgMs: Math.round(latencies.reduce((s, v) => s + v, 0) / n),
+            p50Ms: sorted[Math.floor(n * 0.50)],
+            p95Ms: sorted[Math.floor(n * 0.95)],
+            minMs: sorted[0],
+            maxMs: sorted[n - 1],
+            sampleCount: n,
+        };
+    }
     close() {
         this.db.close();
     }
+}
+function calcLatencyStats(results) {
+    const latencies = results
+        .map(r => r.latencyMs)
+        .filter(ms => ms > 0);
+    if (latencies.length === 0) {
+        return { avgMs: 0, p50Ms: 0, p95Ms: 0, minMs: 0, maxMs: 0, sampleCount: 0 };
+    }
+    const sorted = [...latencies].sort((a, b) => a - b);
+    const n = sorted.length;
+    const avgMs = Math.round(latencies.reduce((s, v) => s + v, 0) / n);
+    const p50Ms = sorted[Math.floor(n * 0.50)];
+    const p95Ms = sorted[Math.floor(n * 0.95)];
+    return { avgMs, p50Ms, p95Ms, minMs: sorted[0], maxMs: sorted[n - 1], sampleCount: n };
 }
 function armId(base) {
     return base.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 32);

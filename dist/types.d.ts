@@ -46,8 +46,12 @@ export interface ExperimentArm {
     promptTemplate: string;
     model: string;
     variables?: Record<string, string>;
-    /** Override the model's default temperature for this arm (e.g. for temperature sweeps) */
+    /** Override the model's default temperature for this arm */
     temperature?: number;
+    /** Temperature sweep: run this arm at each of these temperatures and compare scores.
+     *  When set, `temperature` is ignored and the arm is fanned out into multiple sub-arms.
+     *  Example: [0, 0.3, 0.7, 1.0] */
+    temperatureSweep?: number[];
 }
 export interface ExperimentResult {
     armId: string;
