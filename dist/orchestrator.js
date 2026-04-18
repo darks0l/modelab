@@ -44,6 +44,11 @@ export class ResearchOrchestrator {
         this.progress(`Threshold: ${goal.qualityThreshold} | Arms: ${goal.arms.length} | Max iterations: ${goal.maxIterations}`);
         try {
             for (let iter = 1; iter <= goal.maxIterations; iter++) {
+                // Cross-iteration learning: pull context from prior iterations
+                const iterContext = this.memory.getContextForIteration(goal.id, runId, iter);
+                if (iterContext.contextString) {
+                    this.progress(`\n📚 Prior context loaded (${iterContext.priorIterations.length} prior iteration${iterContext.priorIterations.length !== 1 ? 's' : ''}, best so far: ${iterContext.bestScoreSoFar !== null ? iterContext.bestScoreSoFar + '/10' : 'N/A'})`);
+                }
                 this.progress(`\n── Iteration ${iter}/${goal.maxIterations} ──`);
                 if (this.budget.maxPerRun > 0 && totalCostUsd >= this.budget.maxPerRun) {
                     this.progress('Budget exceeded — stopping');
@@ -81,6 +86,12 @@ export class ResearchOrchestrator {
                         }
                         this.onArmComplete?.(r);
                     }
+                }
+                // Cross-iteration learning: summarize what happened this iteration
+                const iterResults = allResults.filter(r => r.iteration === iter);
+                if (iterResults.length > 0) {
+                    const summary = this.memory.summarize(runId, goal.id, iter, iterResults);
+                    this.progress(`  📝 Lesson: ${summary.lesson}`);
                 }
                 if (bestResult && bestResult.score !== null && bestResult.score >= goal.qualityThreshold) {
                     this.progress(`\n✅ Quality threshold reached: ${bestResult.score} ≥ ${goal.qualityThreshold}`);
@@ -134,8 +145,15 @@ export class ResearchOrchestrator {
                 };
             }
         }
-        // Fill template
-        const variables = { ...arm.variables, question: goal.question, goal: goal.goal };
+        // Get cross-iteration context for this arm's iteration
+        const iterContext = this.memory.getContextForIteration(goal.id, runId, iteration);
+        // Fill template — arms can use {{iteration_context}} to see what prior iterations learned
+        const variables = {
+            ...arm.variables,
+            question: goal.question,
+            goal: goal.goal,
+            iteration_context: iterContext.contextString,
+        };
         const prompt = fillTemplate(arm.promptTemplate, variables);
         // Stream callback
         let streamedOutput = '';

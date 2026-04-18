@@ -88,6 +88,7 @@ USAGE
   modelab config --list                   Show current config
   modelab cache --clear                   Clear the result cache
   modelab route --task <text>             Show model routing decision
+  modelab lessons [--goal-id <id>]        Show what the system learned across runs
   modelab --help                          Show this help
 
 RUN OPTIONS
@@ -118,6 +119,34 @@ ENVIRONMENT
 }
 
 // ── Commands ────────────────────────────────────────────────────────────────
+
+async function cmdLessons(args: string[]) {
+  const memory = new ExperimentMemory();
+  const goalId = extractArg(args, '--goal-id');
+
+  const lessons = memory.getLessons(goalId ?? undefined);
+  if (lessons.length === 0) {
+    console.log('No lessons yet. Run some experiments first: modelab run --goal "..."');
+    memory.close();
+    return;
+  }
+
+  console.log('\n📚 Cross-iteration lessons\n');
+  console.log(`${'─'.repeat(60)}`);
+
+  let lastGoal = '';
+  for (const l of lessons) {
+    if (l.goalId !== lastGoal) {
+      console.log(`\nGoal: ${l.goalId}`);
+      lastGoal = l.goalId;
+    }
+    const scoreStr = l.bestScore !== null ? ` ⭐${l.bestScore}/10` : '';
+    console.log(`  Iteration ${l.iteration}${scoreStr}: ${l.lesson}`);
+  }
+  console.log(`\n${'─'.repeat(60)}`);
+  console.log(`Total lessons: ${lessons.length}`);
+  memory.close();
+}
 
 async function cmdRun(args: string[]) {
   const config = loadConfig();
@@ -420,6 +449,7 @@ switch (subcommand) {
   case 'export':    cmdExport(subArgs);    break;
   case 'route':     cmdRoute(subArgs);     break;
   case 'cache':     cmdCache(subArgs);     break;
+  case 'lessons':   cmdLessons(subArgs);   break;
   case '--help':
   case '-h':
   case undefined:   printHelp();           break;
