@@ -75,7 +75,16 @@ export class ResearchOrchestrator {
         // Batch arms by parallelism
         const batches = batchArray(goal.arms, this.parallelism);
         for (const batch of batches) {
-          if (this.budget.maxPerRun > 0 && totalCostUsd >= this.budget.maxPerRun) {
+          // Pre-check: estimate total cost for this batch before spending anything
+          const batchCostEstimate = batch.reduce((sum, arm) => {
+            const cfg = this.models[arm.model];
+            if (!cfg) return sum;
+            // Rough estimate: 1000 input + 500 output tokens at model's rate
+            return sum + calcCost(1000, 500, cfg);
+          }, 0);
+
+          if (this.budget.maxPerRun > 0 && totalCostUsd + batchCostEstimate > this.budget.maxPerRun) {
+            this.progress(`Budget would exceed limit ($${totalCostUsd.toFixed(4)} + ~$${batchCostEstimate.toFixed(4)} > $${this.budget.maxPerRun}) — stopping`);
             status = 'budget_exceeded';
             break;
           }
@@ -195,16 +204,19 @@ export class ResearchOrchestrator {
 
     // Score
     let score: number | null = null;
+    let scoreError: string | null = null;
     const evalConfig = this.models[this.evalModelKey];
     if (evalConfig) {
       const scoreResult = await scoreOutput(output, goal.question, evalConfig);
       score = scoreResult.score;
+      scoreError = scoreResult.error ?? null;
     }
 
     const result: ExperimentResult = {
       armId: arm.id,
       output,
       score,
+      scoreError,
       costUsd: Math.round(costUsd * 1e6) / 1e6,
       tokensUsed: { input: inputTokens, output: outputTokens },
       durationMs: Date.now() - startMs,

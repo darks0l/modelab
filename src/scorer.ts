@@ -7,34 +7,30 @@ export interface ScoreResult {
   clarity: number;
   correctness: number;
   completeness: number;
+  /** Set when scoring/parsing fails — score will be null in this case */
+  error?: string | null;
 }
 
-const RUBRIC = `Score the following answer to the question.
+const RUBRIC = `Score the following answer to the question.\n\nQuestion: {{question}}\n\nAnswer:\n{{answer}}\n\nYou are an impartial evaluator. Score on three dimensions:\n- Clarity (0-3): Is the answer clear, well-organized, and easy to follow?\n- Correctness (0-4): Is the answer factually/reasoningly sound?\n- Completeness (0-3): Does it fully address all parts of the question?\n\nRespond ONLY with a JSON object with this exact structure:\n{"score": <0-10>, "reasoning": "<1-2 sentences>", "clarity": <0-3>, "correctness": <0-4>, "completeness": <0-3>}\n\nReturn only the JSON. No markdown, no explanation.`;
 
-Question: {{question}}
-
-Answer:
-{{answer}}
-
-You are an impartial evaluator. Score on three dimensions:
-- Clarity (0-3): Is the answer clear, well-organized, and easy to follow?
-- Correctness (0-4): Is the answer factually/reasoningly sound?
-- Completeness (0-3): Does it fully address all parts of the question?
-
-Respond ONLY with a JSON object with this exact structure:
-{"score": <0-10>, "reasoning": "<1-2 sentences>", "clarity": <0-3>, "correctness": <0-4>, "completeness": <0-3>}
-
-Return only the JSON. No markdown, no explanation.`;
+/** Score cache — pure function of (question + first 500 chars of output) */
+const scoreCache = new Map<string, ScoreResult>();
 
 /**
  * Evaluate a model output against a question using an LLM judge.
  * Returns a structured ScoreResult with rubric breakdown.
+ * Caches results to avoid double LLM calls on repeated (question, output) pairs.
  */
 export async function scoreOutput(
   output: string,
   question: string,
   evalModel: ModelConfig
 ): Promise<ScoreResult> {
+  // Cache key: hash of question + first 500 chars of output (stable, fast)
+  const cacheKey = `${question}\x00${output.slice(0, 500)}`;
+  const cached = scoreCache.get(cacheKey);
+  if (cached) return cached;
+
   const prompt = RUBRIC
     .replace('{{question}}', question)
     .replace('{{answer}}', output.length > 4000 ? output.slice(0, 4000) + '\n[truncated]' : output);
@@ -42,11 +38,28 @@ export async function scoreOutput(
   try {
     const response = await callModel(evalModel, prompt);
     const parsed = parseScoreResponse(response);
+    scoreCache.set(cacheKey, parsed);
     return parsed;
   } catch (err) {
-    console.warn('[modelab:scorer] scoring failed:', err);
-    return { score: 0, reasoning: 'Scoring unavailable', clarity: 0, correctness: 0, completeness: 0 };
+    const errorResult: ScoreResult = {
+      score: 0,
+      reasoning: 'Scoring unavailable',
+      clarity: 0,
+      correctness: 0,
+      completeness: 0,
+      error: err instanceof Error ? err.message : String(err),
+    };
+    scoreCache.set(cacheKey, errorResult);
+    return errorResult;
   }
+}
+
+export function clearScoreCache(): void {
+  scoreCache.clear();
+}
+
+export function getScoreCacheSize(): number {
+  return scoreCache.size;
 }
 
 function parseScoreResponse(raw: string): ScoreResult {

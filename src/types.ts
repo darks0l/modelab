@@ -58,6 +58,8 @@ export interface ExperimentResult {
   armId: string;
   output: string;
   score: number | null;
+  /** If scoring/parsing failed, this is the error message */
+  scoreError?: string | null;
   costUsd: number;
   tokensUsed: { input: number; output: number };
   durationMs: number;

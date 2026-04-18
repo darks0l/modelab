@@ -1,37 +1,45 @@
 import { callModel } from './evaluator.js';
-const RUBRIC = `Score the following answer to the question.
-
-Question: {{question}}
-
-Answer:
-{{answer}}
-
-You are an impartial evaluator. Score on three dimensions:
-- Clarity (0-3): Is the answer clear, well-organized, and easy to follow?
-- Correctness (0-4): Is the answer factually/reasoningly sound?
-- Completeness (0-3): Does it fully address all parts of the question?
-
-Respond ONLY with a JSON object with this exact structure:
-{"score": <0-10>, "reasoning": "<1-2 sentences>", "clarity": <0-3>, "correctness": <0-4>, "completeness": <0-3>}
-
-Return only the JSON. No markdown, no explanation.`;
+const RUBRIC = `Score the following answer to the question.\n\nQuestion: {{question}}\n\nAnswer:\n{{answer}}\n\nYou are an impartial evaluator. Score on three dimensions:\n- Clarity (0-3): Is the answer clear, well-organized, and easy to follow?\n- Correctness (0-4): Is the answer factually/reasoningly sound?\n- Completeness (0-3): Does it fully address all parts of the question?\n\nRespond ONLY with a JSON object with this exact structure:\n{"score": <0-10>, "reasoning": "<1-2 sentences>", "clarity": <0-3>, "correctness": <0-4>, "completeness": <0-3>}\n\nReturn only the JSON. No markdown, no explanation.`;
+/** Score cache — pure function of (question + first 500 chars of output) */
+const scoreCache = new Map();
 /**
  * Evaluate a model output against a question using an LLM judge.
  * Returns a structured ScoreResult with rubric breakdown.
+ * Caches results to avoid double LLM calls on repeated (question, output) pairs.
  */
 export async function scoreOutput(output, question, evalModel) {
+    // Cache key: hash of question + first 500 chars of output (stable, fast)
+    const cacheKey = `${question}\x00${output.slice(0, 500)}`;
+    const cached = scoreCache.get(cacheKey);
+    if (cached)
+        return cached;
     const prompt = RUBRIC
         .replace('{{question}}', question)
         .replace('{{answer}}', output.length > 4000 ? output.slice(0, 4000) + '\n[truncated]' : output);
     try {
         const response = await callModel(evalModel, prompt);
         const parsed = parseScoreResponse(response);
+        scoreCache.set(cacheKey, parsed);
         return parsed;
     }
     catch (err) {
-        console.warn('[modelab:scorer] scoring failed:', err);
-        return { score: 0, reasoning: 'Scoring unavailable', clarity: 0, correctness: 0, completeness: 0 };
+        const errorResult = {
+            score: 0,
+            reasoning: 'Scoring unavailable',
+            clarity: 0,
+            correctness: 0,
+            completeness: 0,
+            error: err instanceof Error ? err.message : String(err),
+        };
+        scoreCache.set(cacheKey, errorResult);
+        return errorResult;
     }
+}
+export function clearScoreCache() {
+    scoreCache.clear();
+}
+export function getScoreCacheSize() {
+    return scoreCache.size;
 }
 function parseScoreResponse(raw) {
     // Try to extract JSON from markdown code blocks or raw text
