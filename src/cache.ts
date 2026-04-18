@@ -6,6 +6,7 @@ import { homedir } from 'os';
 import type { ExperimentResult } from './types.js';
 
 export interface CacheEntry {
+  /** Full SHA-256 hash of question:model:armId */
   hash: string;
   output: string;
   score: number | null;
@@ -13,7 +14,8 @@ export interface CacheEntry {
   tokensUsed: { input: number; output: number };
   timestamp: string;
   question: string;
-  model: string;
+  /** Model config key, e.g. "fast", "balanced" */
+  modelKey: string;
   armId: string;
   durationMs: number;
 }
@@ -22,6 +24,7 @@ export class Cache {
   private readonly path: string;
   private readonly ttlMs: number;
   private entries: Map<string, CacheEntry> = new Map();
+  private loadError: Error | null = null;
 
   constructor(ttlMs = 7 * 24 * 60 * 60 * 1000) {
     this.ttlMs = ttlMs;
@@ -29,11 +32,11 @@ export class Cache {
     this.load();
   }
 
-  static hash(question: string, model: string, armId: string): string {
+  /** Full SHA-256 hash — no truncation */
+  static hash(question: string, modelKey: string, armId: string): string {
     return createHash('sha256')
-      .update(`${question}:${model}:${armId}`)
-      .digest('hex')
-      .slice(0, 16);
+      .update(`${question}:${modelKey}:${armId}`)
+      .digest('hex');
   }
 
   get(key: string): CacheEntry | null {
@@ -48,8 +51,11 @@ export class Cache {
     return entry;
   }
 
-  /** Store an experiment result in cache */
-  set(key: string, result: ExperimentResult, question: string): void {
+  /**
+   * Store an experiment result in cache.
+   * @param modelKey - the model config key, e.g. "fast", "balanced"
+   */
+  set(key: string, result: ExperimentResult, question: string, modelKey: string): void {
     const entry: CacheEntry = {
       hash: key,
       output: result.output,
@@ -58,7 +64,7 @@ export class Cache {
       tokensUsed: result.tokensUsed,
       timestamp: result.timestamp,
       question,
-      model: result.armId,
+      modelKey,
       armId: result.armId,
       durationMs: result.durationMs,
     };
@@ -66,27 +72,40 @@ export class Cache {
     this.persist();
   }
 
-  lookup(question: string, model: string, armId: string): CacheEntry | null {
-    const key = Cache.hash(question, model, armId);
+  lookup(question: string, modelKey: string, armId: string): CacheEntry | null {
+    const key = Cache.hash(question, modelKey, armId);
     return this.get(key);
+  }
+
+  /** Returns the cache load error if any (e.g. corrupted file) */
+  getLoadError(): Error | null {
+    return this.loadError;
   }
 
   private load(): void {
     try {
       if (existsSync(this.path)) {
-        const data = JSON.parse(readFileSync(this.path, 'utf8')) as CacheEntry[];
+        const raw = readFileSync(this.path, 'utf8');
+        const data = JSON.parse(raw) as CacheEntry[];
         for (const entry of data) {
-          this.entries.set(entry.hash, entry);
+          if (entry.hash && entry.output !== undefined) {
+            this.entries.set(entry.hash, entry);
+          }
         }
       }
-    } catch { /* ignore */ }
+    } catch (err) {
+      this.loadError = err instanceof Error ? err : new Error(String(err));
+      console.warn(`[modelab:cache] Failed to load cache (${this.path}): ${this.loadError.message}. Starting fresh.`);
+    }
   }
 
   private persist(): void {
     try {
       mkdirSync(dirname(this.path), { recursive: true });
       writeFileSync(this.path, JSON.stringify([...this.entries.values()], null, 2));
-    } catch { /* ignore */ }
+    } catch (err) {
+      console.error(`[modelab:cache] Failed to persist cache: ${err instanceof Error ? err.message : err}`);
+    }
   }
 
   clear(): void {

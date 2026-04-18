@@ -218,7 +218,7 @@ export class ResearchOrchestrator {
     // Cache the result
     if (this.cache && !result.cached) {
       const key = Cache.hash(goal.question, arm.model, arm.id);
-      this.cache.set(key, result, goal.question);
+      this.cache.set(key, result, goal.question, arm.model);
     }
 
     const scoreStr = score !== null ? `${score}/10` : 'N/A';

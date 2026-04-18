@@ -6,16 +6,17 @@ export class Cache {
     path;
     ttlMs;
     entries = new Map();
+    loadError = null;
     constructor(ttlMs = 7 * 24 * 60 * 60 * 1000) {
         this.ttlMs = ttlMs;
         this.path = join(homedir(), '.modelab', 'cache.json');
         this.load();
     }
-    static hash(question, model, armId) {
+    /** Full SHA-256 hash — no truncation */
+    static hash(question, modelKey, armId) {
         return createHash('sha256')
-            .update(`${question}:${model}:${armId}`)
-            .digest('hex')
-            .slice(0, 16);
+            .update(`${question}:${modelKey}:${armId}`)
+            .digest('hex');
     }
     get(key) {
         const entry = this.entries.get(key);
@@ -29,8 +30,11 @@ export class Cache {
         }
         return entry;
     }
-    /** Store an experiment result in cache */
-    set(key, result, question) {
+    /**
+     * Store an experiment result in cache.
+     * @param modelKey - the model config key, e.g. "fast", "balanced"
+     */
+    set(key, result, question, modelKey) {
         const entry = {
             hash: key,
             output: result.output,
@@ -39,34 +43,46 @@ export class Cache {
             tokensUsed: result.tokensUsed,
             timestamp: result.timestamp,
             question,
-            model: result.armId,
+            modelKey,
             armId: result.armId,
             durationMs: result.durationMs,
         };
         this.entries.set(key, entry);
         this.persist();
     }
-    lookup(question, model, armId) {
-        const key = Cache.hash(question, model, armId);
+    lookup(question, modelKey, armId) {
+        const key = Cache.hash(question, modelKey, armId);
         return this.get(key);
+    }
+    /** Returns the cache load error if any (e.g. corrupted file) */
+    getLoadError() {
+        return this.loadError;
     }
     load() {
         try {
             if (existsSync(this.path)) {
-                const data = JSON.parse(readFileSync(this.path, 'utf8'));
+                const raw = readFileSync(this.path, 'utf8');
+                const data = JSON.parse(raw);
                 for (const entry of data) {
-                    this.entries.set(entry.hash, entry);
+                    if (entry.hash && entry.output !== undefined) {
+                        this.entries.set(entry.hash, entry);
+                    }
                 }
             }
         }
-        catch { /* ignore */ }
+        catch (err) {
+            this.loadError = err instanceof Error ? err : new Error(String(err));
+            console.warn(`[modelab:cache] Failed to load cache (${this.path}): ${this.loadError.message}. Starting fresh.`);
+        }
     }
     persist() {
         try {
             mkdirSync(dirname(this.path), { recursive: true });
             writeFileSync(this.path, JSON.stringify([...this.entries.values()], null, 2));
         }
-        catch { /* ignore */ }
+        catch (err) {
+            console.error(`[modelab:cache] Failed to persist cache: ${err instanceof Error ? err.message : err}`);
+        }
     }
     clear() {
         this.entries.clear();

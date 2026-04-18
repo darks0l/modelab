@@ -28,20 +28,110 @@ export async function callModelFull(config: ModelConfig, prompt: string, apiKey?
   return callOpenAI(config, prompt, key);
 }
 
+// ── Retry + Timeout helpers ──────────────────────────────────────────────────
+
+const DEFAULT_TIMEOUT_MS = 60_000; // 60s
+const STREAM_TIMEOUT_MS = 120_000; // 120s
+
+interface RetryOptions {
+  maxRetries: number;
+  initialDelayMs: number;
+  timeoutMs: number;
+  signal?: AbortSignal;
+}
+
+const RETRYABLE_STATUS = new Set([429, 500, 502, 503, 504]);
+
+/**
+ * Fetch with timeout + exponential backoff retry for transient errors.
+ */
+async function fetchWithRetry(
+  url: string,
+  options: RequestInit,
+  opts: Partial<RetryOptions> = {}
+): Promise<Response> {
+  const { maxRetries = 3, initialDelayMs = 1000, timeoutMs = DEFAULT_TIMEOUT_MS, signal } = opts;
+
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    const composedSignal = signal
+      ? anySignal(signal, controller.signal)
+      : controller.signal;
+
+    try {
+      const res = await fetch(url, { ...options, signal: composedSignal });
+      clearTimeout(timer);
+
+      if (res.ok) return res;
+
+      if (attempt < maxRetries && RETRYABLE_STATUS.has(res.status)) {
+        const retryAfter = res.headers.get('Retry-After');
+        const delay = retryAfter
+          ? parseInt(retryAfter, 10) * 1000
+          : initialDelayMs * 2 ** attempt + Math.random() * 500;
+        console.warn(`[modelab:evaluator] ${res.status} — retrying in ${Math.round(delay)}ms (attempt ${attempt + 1}/${maxRetries})`);
+        await sleep(delay);
+        continue;
+      }
+
+      return res;
+    } catch (err: unknown) {
+      clearTimeout(timer);
+      if (attempt < maxRetries && isNetworkError(err)) {
+        const delay = initialDelayMs * 2 ** attempt + Math.random() * 500;
+        console.warn(`[modelab:evaluator] Network error — retrying in ${Math.round(delay)}ms (attempt ${attempt + 1}/${maxRetries}): ${err}`);
+        await sleep(delay);
+        continue;
+      }
+      throw err;
+    }
+  }
+
+  // Should not reach here, but satisfy TypeScript
+  throw new Error('Max retries exceeded');
+}
+
+function anySignal(...signals: AbortSignal[]): AbortSignal {
+  const controller = new AbortController();
+  for (const s of signals) {
+    s.addEventListener('abort', () => controller.abort());
+  }
+  return controller.signal;
+}
+
+function isNetworkError(err: unknown): boolean {
+  if (err instanceof Error) {
+    return (
+      err.name === 'AbortError' ||
+      err.name === 'TypeError' || // network failure
+      err.message.includes('fetch') ||
+      err.message.includes('network') ||
+      err.message.includes('ECONNREFUSED') ||
+      err.message.includes('ENOTFOUND')
+    );
+  }
+  return false;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
 // ── OpenAI ─────────────────────────────────────────────────────────────────
 
-async function callOpenAI(config: ModelConfig, prompt: string, apiKey: string): Promise<CallResult> {
-  const baseUrl = config.baseUrl ?? 'https://api.openai.com/v1';
-  if (config.stream) return streamOpenAI(config, baseUrl, config.model, apiKey, prompt);
+async function callOpenAI(cfg: ModelConfig, prompt: string, apiKey: string): Promise<CallResult> {
+  const baseUrl = cfg.baseUrl ?? 'https://api.openai.com/v1';
+  if (cfg.stream) return streamOpenAI(cfg, baseUrl, cfg.model, apiKey, prompt);
 
-  const res = await fetch(`${baseUrl}/chat/completions`, {
+  const res = await fetchWithRetry(`${baseUrl}/chat/completions`, {
     method: 'POST',
     headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
     body: JSON.stringify({
-      model: config.model,
+      model: cfg.model,
       messages: [{ role: 'user', content: prompt }],
-      max_tokens: config.maxTokens ?? 512,
-      temperature: config.temperature ?? 0,
+      max_tokens: cfg.maxTokens ?? 512,
+      temperature: cfg.temperature ?? 0,
     }),
   });
 
@@ -61,11 +151,12 @@ async function callOpenAI(config: ModelConfig, prompt: string, apiKey: string): 
 }
 
 async function streamOpenAI(cfg: ModelConfig, baseUrl: string, model: string, apiKey: string, prompt: string): Promise<CallResult> {
-  const res = await fetch(`${baseUrl}/chat/completions`, {
+  const res = await fetchWithRetry(`${baseUrl}/chat/completions`, {
     method: 'POST',
     headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
     body: JSON.stringify({ model, messages: [{ role: 'user', content: prompt }], max_tokens: cfg.maxTokens ?? 512, temperature: cfg.temperature ?? 0, stream: true }),
-  });
+  }, { timeoutMs: STREAM_TIMEOUT_MS });
+
   if (!res.ok) throw new Error(`OpenAI error ${res.status}`);
   if (!res.body) throw new Error('No response body');
 
@@ -73,6 +164,7 @@ async function streamOpenAI(cfg: ModelConfig, baseUrl: string, model: string, ap
   const dec = new TextDecoder();
   let output = '';
   let done = false;
+
   while (!done) {
     const { value, done: d } = await reader.read();
     done = d;
@@ -95,15 +187,16 @@ async function streamOpenAI(cfg: ModelConfig, baseUrl: string, model: string, ap
 
 // ── Anthropic ──────────────────────────────────────────────────────────────
 
-async function callAnthropic(config: ModelConfig, prompt: string, apiKey: string): Promise<CallResult> {
-  const baseUrl = config.baseUrl ?? 'https://api.anthropic.com/v1';
-  if (config.stream) return streamAnthropic(config, baseUrl, apiKey, prompt);
+async function callAnthropic(cfg: ModelConfig, prompt: string, apiKey: string): Promise<CallResult> {
+  const baseUrl = cfg.baseUrl ?? 'https://api.anthropic.com/v1';
+  if (cfg.stream) return streamAnthropic(cfg, baseUrl, apiKey, prompt);
 
-  const res = await fetch(`${baseUrl}/messages`, {
+  const res = await fetchWithRetry(`${baseUrl}/messages`, {
     method: 'POST',
     headers: { 'x-api-key': apiKey, 'anthropic-version': '2023-06-01', 'Content-Type': 'application/json' },
-    body: JSON.stringify({ model: config.model, max_tokens: config.maxTokens ?? 1024, messages: [{ role: 'user', content: prompt }] }),
+    body: JSON.stringify({ model: cfg.model, max_tokens: cfg.maxTokens ?? 1024, messages: [{ role: 'user', content: prompt }] }),
   });
+
   if (!res.ok) throw new Error(`Anthropic error ${res.status}: ${await res.text()}`);
 
   const json = await res.json() as {
@@ -119,11 +212,12 @@ async function callAnthropic(config: ModelConfig, prompt: string, apiKey: string
 }
 
 async function streamAnthropic(cfg: ModelConfig, baseUrl: string, apiKey: string, prompt: string): Promise<CallResult> {
-  const res = await fetch(`${baseUrl}/messages`, {
+  const res = await fetchWithRetry(`${baseUrl}/messages`, {
     method: 'POST',
     headers: { 'x-api-key': apiKey, 'anthropic-version': '2023-06-01', 'Content-Type': 'application/json' },
     body: JSON.stringify({ model: cfg.model, max_tokens: cfg.maxTokens ?? 1024, messages: [{ role: 'user', content: prompt }], stream: true }),
-  });
+  }, { timeoutMs: STREAM_TIMEOUT_MS });
+
   if (!res.ok) throw new Error(`Anthropic error ${res.status}`);
   if (!res.body) throw new Error('No response body');
 
@@ -153,13 +247,14 @@ async function streamAnthropic(cfg: ModelConfig, baseUrl: string, apiKey: string
 
 // ── Ollama ────────────────────────────────────────────────────────────────
 
-async function callOllama(config: ModelConfig, prompt: string): Promise<CallResult> {
-  const baseUrl = config.baseUrl ?? 'http://localhost:11434';
-  const res = await fetch(`${baseUrl}/api/generate`, {
+async function callOllama(cfg: ModelConfig, prompt: string): Promise<CallResult> {
+  const baseUrl = cfg.baseUrl ?? 'http://localhost:11434';
+  const res = await fetchWithRetry(`${baseUrl}/api/generate`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ model: config.model, prompt, stream: false, options: { temperature: config.temperature ?? 0.7, num_predict: config.maxTokens ?? 1024 } }),
+    body: JSON.stringify({ model: cfg.model, prompt, stream: false, options: { temperature: cfg.temperature ?? 0.7, num_predict: cfg.maxTokens ?? 1024 } }),
   });
+
   if (!res.ok) throw new Error(`Ollama error ${res.status}: ${await res.text()}`);
 
   const json = await res.json() as { response: string; prompt_eval_count?: number; eval_count?: number };
@@ -170,15 +265,16 @@ async function callOllama(config: ModelConfig, prompt: string): Promise<CallResu
   };
 }
 
-// ── Groq ──────────────────────────────────────────────────────────────────
+// ── Groq ─────────────────────────────────────────────────────────────────
 
-async function callGroq(config: ModelConfig, prompt: string, apiKey: string): Promise<CallResult> {
-  const baseUrl = config.baseUrl ?? 'https://api.groq.com/openai/v1';
-  const res = await fetch(`${baseUrl}/chat/completions`, {
+async function callGroq(cfg: ModelConfig, prompt: string, apiKey: string): Promise<CallResult> {
+  const baseUrl = cfg.baseUrl ?? 'https://api.groq.com/openai/v1';
+  const res = await fetchWithRetry(`${baseUrl}/chat/completions`, {
     method: 'POST',
     headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ model: config.model, messages: [{ role: 'user', content: prompt }], max_tokens: config.maxTokens ?? 1024, temperature: config.temperature ?? 0 }),
+    body: JSON.stringify({ model: cfg.model, messages: [{ role: 'user', content: prompt }], max_tokens: cfg.maxTokens ?? 1024, temperature: cfg.temperature ?? 0 }),
   });
+
   if (!res.ok) throw new Error(`Groq error ${res.status}: ${await res.text()}`);
 
   const json = await res.json() as {
@@ -194,16 +290,17 @@ async function callGroq(config: ModelConfig, prompt: string, apiKey: string): Pr
   };
 }
 
-// ── Gemini ────────────────────────────────────────────────────────────────
+// ── Gemini ───────────────────────────────────────────────────────────────
 
-async function callGemini(config: ModelConfig, prompt: string, apiKey: string): Promise<CallResult> {
-  const baseUrl = config.baseUrl ?? 'https://generativelanguage.googleapis.com/v1beta';
-  const model = config.model.startsWith('models/') ? config.model : `models/${config.model}`;
-  const res = await fetch(`${baseUrl}/${model}:generateContent?key=${apiKey}`, {
+async function callGemini(cfg: ModelConfig, prompt: string, apiKey: string): Promise<CallResult> {
+  const baseUrl = cfg.baseUrl ?? 'https://generativelanguage.googleapis.com/v1beta';
+  const model = cfg.model.startsWith('models/') ? cfg.model : `models/${cfg.model}`;
+  const res = await fetchWithRetry(`${baseUrl}/${model}:generateContent?key=${apiKey}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }], generationConfig: { maxOutputTokens: config.maxTokens ?? 1024, temperature: config.temperature ?? 0 } }),
+    body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }], generationConfig: { maxOutputTokens: cfg.maxTokens ?? 1024, temperature: cfg.temperature ?? 0 } }),
   });
+
   if (!res.ok) throw new Error(`Gemini error ${res.status}: ${await res.text()}`);
 
   const json = await res.json() as {
@@ -221,13 +318,14 @@ async function callGemini(config: ModelConfig, prompt: string, apiKey: string): 
 
 // ── Perplexity ────────────────────────────────────────────────────────────
 
-async function callPerplexity(config: ModelConfig, prompt: string, apiKey: string): Promise<CallResult> {
-  const baseUrl = config.baseUrl ?? 'https://api.perplexity.ai';
-  const res = await fetch(`${baseUrl}/chat/completions`, {
+async function callPerplexity(cfg: ModelConfig, prompt: string, apiKey: string): Promise<CallResult> {
+  const baseUrl = cfg.baseUrl ?? 'https://api.perplexity.ai';
+  const res = await fetchWithRetry(`${baseUrl}/chat/completions`, {
     method: 'POST',
     headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ model: config.model, messages: [{ role: 'user', content: prompt }], max_tokens: config.maxTokens ?? 1024, temperature: config.temperature ?? 0 }),
+    body: JSON.stringify({ model: cfg.model, messages: [{ role: 'user', content: prompt }], max_tokens: cfg.maxTokens ?? 1024, temperature: cfg.temperature ?? 0 }),
   });
+
   if (!res.ok) throw new Error(`Perplexity error ${res.status}: ${await res.text()}`);
 
   const json = await res.json() as {
@@ -243,15 +341,16 @@ async function callPerplexity(config: ModelConfig, prompt: string, apiKey: strin
   };
 }
 
-// ── MiniMax ──────────────────────────────────────────────────────────────
+// ── MiniMax ───────────────────────────────────────────────────────────────
 
-async function callMinimax(config: ModelConfig, prompt: string, apiKey: string): Promise<CallResult> {
-  const baseUrl = config.baseUrl ?? 'https://api.minimax.chat';
-  const res = await fetch(`${baseUrl}/v1/text/chatcompletion_v2`, {
+async function callMinimax(cfg: ModelConfig, prompt: string, apiKey: string): Promise<CallResult> {
+  const baseUrl = cfg.baseUrl ?? 'https://api.minimax.chat';
+  const res = await fetchWithRetry(`${baseUrl}/v1/text/chatcompletion_v2`, {
     method: 'POST',
     headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ model: config.model, messages: [{ role: 'user', content: prompt }], max_tokens: config.maxTokens ?? 1024, temperature: config.temperature ?? 0 }),
+    body: JSON.stringify({ model: cfg.model, messages: [{ role: 'user', content: prompt }], max_tokens: cfg.maxTokens ?? 1024, temperature: cfg.temperature ?? 0 }),
   });
+
   if (!res.ok) throw new Error(`MiniMax error ${res.status}: ${await res.text()}`);
 
   const json = await res.json() as { choices?: Array<{ messages?: Array<{ content: string }> }> };
@@ -261,15 +360,16 @@ async function callMinimax(config: ModelConfig, prompt: string, apiKey: string):
 
 // ── OpenRouter ────────────────────────────────────────────────────────────
 
-async function callOpenRouter(config: ModelConfig, prompt: string, apiKey: string): Promise<CallResult> {
-  const baseUrl = config.baseUrl ?? 'https://openrouter.ai/api/v1';
-  if (config.stream) return streamOpenAI(config, baseUrl, config.model, apiKey, prompt);
+async function callOpenRouter(cfg: ModelConfig, prompt: string, apiKey: string): Promise<CallResult> {
+  const baseUrl = cfg.baseUrl ?? 'https://openrouter.ai/api/v1';
+  if (cfg.stream) return streamOpenAI(cfg, baseUrl, cfg.model, apiKey, prompt);
 
-  const res = await fetch(`${baseUrl}/chat/completions`, {
+  const res = await fetchWithRetry(`${baseUrl}/chat/completions`, {
     method: 'POST',
     headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json', 'HTTP-Referer': 'https://github.com/darks0l/modelab', 'X-Title': 'modelab' },
-    body: JSON.stringify({ model: config.model, messages: [{ role: 'user', content: prompt }], max_tokens: config.maxTokens ?? 1024, temperature: config.temperature ?? 0 }),
+    body: JSON.stringify({ model: cfg.model, messages: [{ role: 'user', content: prompt }], max_tokens: cfg.maxTokens ?? 1024, temperature: cfg.temperature ?? 0 }),
   });
+
   if (!res.ok) throw new Error(`OpenRouter error ${res.status}: ${await res.text()}`);
 
   const json = await res.json() as {
