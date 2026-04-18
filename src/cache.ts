@@ -18,6 +18,7 @@ export interface CacheEntry {
   modelKey: string;
   armId: string;
   durationMs: number;
+  latencyMs: number;
 }
 
 export class Cache {
@@ -67,6 +68,7 @@ export class Cache {
       modelKey,
       armId: result.armId,
       durationMs: result.durationMs,
+      latencyMs: result.latencyMs ?? 0,
     };
     this.entries.set(key, entry);
     this.persist();

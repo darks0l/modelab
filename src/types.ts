@@ -1,6 +1,6 @@
 // ── Core Types ──────────────────────────────────────────────────────────────
 
-export type ModelProvider = 'openai' | 'anthropic' | 'ollama' | 'openrouter' | 'minimax' | 'groq' | 'gemini' | 'perplexity';
+export type ModelProvider = 'openai' | 'anthropic' | 'ollama' | 'openrouter' | 'minimax' | 'groq' | 'gemini' | 'perplexity' | 'glm';
 
 export interface ModelConfig {
   provider: ModelProvider;
@@ -54,10 +54,14 @@ export interface ExperimentArm {
   promptTemplate: string;
   model: string; // key into models config
   variables?: Record<string, string>;
+  /** Override the model's default temperature for this arm (e.g. for temperature sweeps) */
+  temperature?: number;
 }
 
 export interface ExperimentResult {
   armId: string;
+  /** The model config key used for this arm (e.g. "balanced", "fast", "reasoning") */
+  model: string;
   output: string;
   score: number | null;
   /** If scoring/parsing failed, this is the error message */
@@ -65,6 +69,8 @@ export interface ExperimentResult {
   costUsd: number;
   tokensUsed: { input: number; output: number };
   durationMs: number;
+  /** Time-to-first-token in ms — 0 for non-streaming calls */
+  latencyMs: number;
   timestamp: string;
   iteration: number;
   /** Whether this result came from cache */

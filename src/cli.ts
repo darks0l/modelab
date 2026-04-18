@@ -16,7 +16,7 @@ const CACHE_TTL = 7 * 24 * 60 * 60 * 1000; // 7 days
 
 // ── Config Schema ──────────────────────────────────────────────────────────
 
-const ModelProviderEnum = z.enum(['openai', 'anthropic', 'ollama', 'openrouter', 'minimax', 'groq', 'gemini', 'perplexity']);
+const ModelProviderEnum = z.enum(['openai', 'anthropic', 'ollama', 'openrouter', 'minimax', 'groq', 'gemini', 'perplexity', 'glm']);
 
 const ModelConfigSchema = z.object({
   provider: ModelProviderEnum,
@@ -65,6 +65,7 @@ function defaultConfig() {
       coding: { provider: 'ollama', model: 'qwen3-coder', baseUrl: 'http://localhost:11434', costPerMillionInput: 0, costPerMillionOutput: 0 },
       groq: { provider: 'groq', model: 'llama-3.3-70b-versatile', costPerMillionInput: 0, costPerMillionOutput: 0 },
       gemini: { provider: 'gemini', model: 'gemini-2.0-flash', costPerMillionInput: 0, costPerMillionOutput: 0 },
+      glm: { provider: 'glm', model: 'glm-4.7', costPerMillionInput: 0.1, costPerMillionOutput: 0.1 },
     },
     budget: { maxPerRun: 2.0, maxPerExperiment: 0.5, trackCosts: true },
     evalModel: 'balanced',
@@ -101,11 +102,15 @@ RUN OPTIONS
   --output <path>         Write output to file
   --no-cache              Disable result caching
   --stream                Show tokens as they arrive
+  --temperature <n>       Set temperature for all arms (0.0–2.0)
+  --temperature-sweep <v> Comma-separated temperatures to sweep across (e.g. 0,0.3,0.7,1.0)
+                           Each model arm expands into one arm per temperature value
 
 EXAMPLES
   modelab run --goal "What causes migraines?" --threshold 8
   modelab run --goal "Review my API design" --template code-review --arms balanced,coding
   modelab run --goal "Compare Postgres vs DynamoDB" --template compare --arms balanced,reasoning
+  modelab run --goal "Write a short poem" --temperature-sweep 0,0.3,0.7,1.0 --arms balanced
   modelab export run-abc123 --format html --output report.html
 
 ENVIRONMENT
@@ -175,6 +180,15 @@ async function cmdRun(args: string[]) {
     process.exit(1);
   }
 
+  // Temperature sweep: --temperature-sweep 0,0.3,0.7,1.0 expands each arm into multiple temp variants
+  const tempSweepRaw = extractArg(args, '--temperature-sweep');
+  const temperatureSweep: number[] = tempSweepRaw
+    ? tempSweepRaw.split(',').map(s => { const v = parseFloat(s.trim()); if (isNaN(v) || v < 0 || v > 2) { console.error(`❌ Invalid temperature value: ${s.trim()}`); process.exit(1); } return v; })
+    : [];
+  // Single temperature override (applies to all arms if no sweep)
+  const temperatureRaw = extractArg(args, '--temperature');
+  const temperature: number | undefined = temperatureRaw ? parseFloat(temperatureRaw) : undefined;
+
   // Get template
   let promptTemplate = `You are a research agent.
 
@@ -194,18 +208,43 @@ Provide a thorough, well-reasoned, and comprehensive response.`;
     templateName = tmpl.name;
   }
 
-  console.log(`\n🌑 modelab — ${templateName} mode`);
-  console.log(`   Question: ${goalText}`);
-  console.log(`   Models: ${armModels.join(', ')}`);
-  console.log(`   Threshold: ${qualityThreshold}/10 | Iterations: ${maxIterations}\n`);
-
   const goalId = `goal-${Date.now()}`;
-  const arms: ExperimentArm[] = armModels.map((model, i) => ({
-    id: `${model}-arm-${i + 1}`,
-    name: `${model} (${config.models[model].provider})`,
-    promptTemplate,
-    model,
-  }));
+
+  // Build arms — optionally expanded with temperature sweep
+  let arms: ExperimentArm[];
+  if (temperatureSweep.length > 0) {
+    arms = [];
+    for (const model of armModels) {
+      for (const temp of temperatureSweep) {
+        const tempStr = temp.toFixed(1).replace(/\.0$/, '');
+        arms.push({
+          id: `${model}-t${tempStr}-arm`,
+          name: `${model} (${config.models[model].provider}, temp=${tempStr})`,
+          promptTemplate,
+          model,
+          temperature: temp,
+        });
+      }
+    }
+    console.log(`\n🌑 modelab — ${templateName} mode`);
+    console.log(`   Question: ${goalText}`);
+    console.log(`   Temperature sweep: [${temperatureSweep.map(t => t.toFixed(1)).join(', ')}]`);
+    console.log(`   Models: ${armModels.join(', ')}`);
+    console.log(`   Total arms: ${arms.length} (${armModels.length} models × ${temperatureSweep.length} temperatures)`);
+    console.log(`   Threshold: ${qualityThreshold}/10 | Iterations: ${maxIterations}\n`);
+  } else {
+    arms = armModels.map((model, i) => ({
+      id: `${model}-arm-${i + 1}`,
+      name: `${model} (${config.models[model].provider})${temperature !== undefined ? `, temp=${temperature}` : ''}`,
+      promptTemplate,
+      model,
+      ...(temperature !== undefined ? { temperature } : {}),
+    }));
+    console.log(`\n🌑 modelab — ${templateName} mode`);
+    console.log(`   Question: ${goalText}`);
+    console.log(`   Models: ${armModels.join(', ')}${temperature !== undefined ? ` @ temp=${temperature}` : ''}`);
+    console.log(`   Threshold: ${qualityThreshold}/10 | Iterations: ${maxIterations}\n`);
+  }
 
   const goal: ResearchGoal = {
     id: goalId,

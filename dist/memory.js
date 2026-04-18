@@ -25,6 +25,7 @@ function openDb() {
       output       TEXT  NOT NULL,
       model        TEXT  NOT NULL,
       duration_ms  INTEGER NOT NULL,
+      latency_ms   INTEGER NOT NULL DEFAULT 0,
       iteration    INTEGER NOT NULL,
       timestamp    TEXT  NOT NULL
     );
@@ -58,11 +59,11 @@ export class ExperimentMemory {
         const stmt = this.db.prepare(`
       INSERT INTO experiments
         (id, run_id, goal_id, arm_id, score, cost_usd, input_tokens, output_tokens,
-         output, model, duration_ms, iteration, timestamp)
+         output, model, duration_ms, latency_ms, iteration, timestamp)
       VALUES
-        (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
-        stmt.run(`${armId(result.armId)}-${Date.now()}`, runId, goalId, result.armId, result.score, result.costUsd, result.tokensUsed.input, result.tokensUsed.output, result.output, result.armId.split(':')[0], result.durationMs, result.iteration, result.timestamp);
+        stmt.run(`${armId(result.armId)}-${Date.now()}`, runId, goalId, result.armId, result.score, result.costUsd, result.tokensUsed.input, result.tokensUsed.output, result.output, result.model, result.durationMs, result.latencyMs ?? 0, result.iteration, result.timestamp);
     }
     getHistory(goalId) {
         const sql = goalId
@@ -244,11 +245,13 @@ function mapSummaryRow(r) {
 function mapRow(r) {
     return {
         armId: r.arm_id,
+        model: r.model,
         output: r.output,
         score: r.score ?? null,
         costUsd: r.cost_usd,
         tokensUsed: { input: r.input_tokens, output: r.output_tokens },
         durationMs: r.duration_ms,
+        latencyMs: r.latency_ms ?? 0,
         timestamp: r.timestamp,
         iteration: r.iteration,
         runId: r.run_id,

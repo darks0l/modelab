@@ -30,6 +30,7 @@ describe('memory persistence schema', () => {
         output       TEXT  NOT NULL,
         model        TEXT  NOT NULL,
         duration_ms  INTEGER NOT NULL,
+        latency_ms   INTEGER NOT NULL DEFAULT 0,
         iteration    INTEGER NOT NULL,
         timestamp    TEXT  NOT NULL
       );
@@ -68,9 +69,9 @@ describe('memory persistence schema', () => {
     const now = new Date().toISOString();
     db.prepare(`
       INSERT INTO experiments
-        (id, run_id, goal_id, arm_id, score, cost_usd, input_tokens, output_tokens, output, model, duration_ms, iteration, timestamp)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run('exp-1', 'run-1', 'goal-1', 'arm-balanced', 8.5, 0.002, 200, 100, 'Answer text', 'balanced', 500, 1, now);
+        (id, run_id, goal_id, arm_id, score, cost_usd, input_tokens, output_tokens, output, model, duration_ms, latency_ms, iteration, timestamp)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run('exp-1', 'run-1', 'goal-1', 'arm-balanced', 8.5, 0.002, 200, 100, 'Answer text', 'balanced', 500, 0, 1, now);
 
     const row = db.prepare('SELECT * FROM experiments WHERE id = ?').get('exp-1') as Record<string, unknown>;
     expect(row.run_id).toBe('run-1');
@@ -93,10 +94,10 @@ describe('memory persistence schema', () => {
   it('calculates average score correctly', () => {
     const db = openTestDb();
     const now = new Date().toISOString();
-    const insert = db.prepare(`INSERT INTO experiments (id, run_id, goal_id, arm_id, score, cost_usd, input_tokens, output_tokens, output, model, duration_ms, iteration, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
-    insert.run('e1', 'r', 'g', 'a', 7.0, 0.001, 100, 50, 'out', 'm', 100, 1, now);
-    insert.run('e2', 'r', 'g', 'a', 9.0, 0.001, 100, 50, 'out', 'm', 100, 1, now);
-    insert.run('e3', 'r', 'g', 'a', null, 0.001, 100, 50, 'out', 'm', 100, 1, now);
+    const insert = db.prepare(`INSERT INTO experiments (id, run_id, goal_id, arm_id, score, cost_usd, input_tokens, output_tokens, output, model, duration_ms, latency_ms, iteration, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+    insert.run('e1', 'r', 'g', 'a', 7.0, 0.001, 100, 50, 'out', 'm', 100, 0, 1, now);
+    insert.run('e2', 'r', 'g', 'a', 9.0, 0.001, 100, 50, 'out', 'm', 100, 0, 1, now);
+    insert.run('e3', 'r', 'g', 'a', null, 0.001, 100, 50, 'out', 'm', 100, 0, 1, now);
 
     const avgRow = db.prepare(`SELECT AVG(score) as avg FROM experiments WHERE goal_id = ? AND score IS NOT NULL`).get('g') as { avg: number };
     expect(avgRow.avg).toBeCloseTo(8.0);
@@ -106,10 +107,10 @@ describe('memory persistence schema', () => {
   it('totals cost correctly across multiple rows', () => {
     const db = openTestDb();
     const now = new Date().toISOString();
-    const insert = db.prepare(`INSERT INTO experiments (id, run_id, goal_id, arm_id, score, cost_usd, input_tokens, output_tokens, output, model, duration_ms, iteration, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
-    insert.run('e1', 'r', 'g', 'a', 7, 0.001, 100, 50, 'out', 'm', 100, 1, now);
-    insert.run('e2', 'r', 'g', 'a', 8, 0.002, 100, 50, 'out', 'm', 100, 1, now);
-    insert.run('e3', 'r', 'g', 'a', 9, 0.0035, 100, 50, 'out', 'm', 100, 1, now);
+    const insert = db.prepare(`INSERT INTO experiments (id, run_id, goal_id, arm_id, score, cost_usd, input_tokens, output_tokens, output, model, duration_ms, latency_ms, iteration, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+    insert.run('e1', 'r', 'g', 'a', 7, 0.001, 100, 50, 'out', 'm', 100, 0, 1, now);
+    insert.run('e2', 'r', 'g', 'a', 8, 0.002, 100, 50, 'out', 'm', 100, 0, 1, now);
+    insert.run('e3', 'r', 'g', 'a', 9, 0.0035, 100, 50, 'out', 'm', 100, 0, 1, now);
 
     const total = db.prepare(`SELECT SUM(cost_usd) as total FROM experiments WHERE goal_id = ?`).get('g') as { total: number };
     expect(total.total).toBeCloseTo(0.0065);

@@ -1,6 +1,6 @@
 {
   "name": "modelab",
-  "version": "0.3.2",
+  "version": "0.3.4",
   "description": "Autonomous AI research OS — run parallel experiments, compare models, export reports, learn from history",
   "type": "module",
   "main": "./dist/index.js",
@@ -34,7 +34,6 @@
     "url": "https://github.com/darks0l/modelab.git"
   },
   "dependencies": {
-    "@lenml/tokenizer-gpt2": "^3.7.2",
     "better-sqlite3": "^11.0.0",
     "tiktoken": "^1.0.22",
     "zod": "^3.0.0"

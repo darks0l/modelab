@@ -13,6 +13,7 @@ const TEST_CACHE_PATH = join(TEST_CACHE_DIR, 'cache.json');
 function makeResult(overrides: Partial<ExperimentResult> = {}): ExperimentResult {
   return {
     armId: 'test-arm',
+    model: 'balanced',
     output: 'Hello world',
     score: 7.5,
     costUsd: 0.001,

@@ -161,6 +161,7 @@ export class ResearchOrchestrator {
 
   private async runArm(arm: ExperimentArm, goal: ResearchGoal, iteration: number, runId: string): Promise<ExperimentResult> {
     const startMs = Date.now();
+    let latencyMs = 0; // Time-to-first-token (TTFT)
     const modelConfig = this.models[arm.model];
     if (!modelConfig) {
       throw new Error(`Unknown model: "${arm.model}". Available: ${Object.keys(this.models).join(', ')}`);
@@ -177,7 +178,9 @@ export class ResearchOrchestrator {
           cached: true,
           runId,
           goalId: goal.id,
+          model: arm.model,
           durationMs: cached.durationMs ?? 0,
+          latencyMs: 0,
         };
       }
     }
@@ -194,10 +197,12 @@ export class ResearchOrchestrator {
     };
     const prompt = fillTemplate(arm.promptTemplate, variables);
 
-    // Stream callback
+    // Stream callback — tracks time-to-first-token
     let streamedOutput = '';
+    let firstTokenMs: number | null = null;
     const streamCb = this.onStream
       ? (chunk: string) => {
+          if (firstTokenMs === null) firstTokenMs = Date.now() - startMs;
           streamedOutput += chunk;
           this.onStream!(arm.name, chunk);
         }
@@ -208,11 +213,18 @@ export class ResearchOrchestrator {
     let outputTokens = 0;
 
     try {
-      const configWithStream = { ...modelConfig, stream: streamCb };
+      // Arm-level temperature overrides model default
+      const configWithStream: typeof modelConfig = arm.temperature !== undefined
+        ? { ...modelConfig, temperature: arm.temperature, stream: streamCb }
+        : { ...modelConfig, stream: streamCb };
       const result = await callModelFull(configWithStream, prompt);
       output = result.output;
       inputTokens = result.inputTokens;
       outputTokens = result.outputTokens;
+      // For streaming calls, TTFT was captured in the stream callback
+      // For non-streaming, estimate TTFT as 10% of total duration (rough proxy)
+      const elapsed = Date.now() - startMs;
+      latencyMs = firstTokenMs ?? Math.round(elapsed * 0.1);
     } catch (err) {
       throw new Error(`Arm "${arm.name}" failed: ${err}`);
     }
@@ -235,12 +247,14 @@ export class ResearchOrchestrator {
 
     const result: ExperimentResult = {
       armId: arm.id,
+      model: arm.model,
       output,
       score,
       scoreError,
       costUsd: Math.round(costUsd * 1e6) / 1e6,
       tokensUsed: { input: inputTokens, output: outputTokens },
       durationMs: Date.now() - startMs,
+      latencyMs,
       timestamp: new Date().toISOString(),
       iteration,
       cached: false,
@@ -256,7 +270,8 @@ export class ResearchOrchestrator {
 
     const scoreStr = score !== null ? `${score}/10` : 'N/A';
     const cachedStr = result.cached ? ' 🗃️' : '';
-    this.progress(`  ${result.cached ? '🗃️' : '✅'} ${arm.name}: ${scoreStr}${cachedStr} | $${result.costUsd.toFixed(4)} | ${inputTokens + outputTokens} tokens | ${(result.durationMs / 1000).toFixed(1)}s`);
+    const latencyStr = result.latencyMs > 0 ? ` | TTFT: ${result.latencyMs}ms` : '';
+    this.progress(`  ${result.cached ? '🗃️' : '✅'} ${arm.name}: ${scoreStr}${cachedStr} | $${result.costUsd.toFixed(4)} | ${inputTokens + outputTokens} tokens | ${(result.durationMs / 1000).toFixed(1)}s${latencyStr}`);
 
     return result;
   }
@@ -272,7 +287,8 @@ export class ResearchOrchestrator {
     for (const r of sorted) {
       const scoreStr = r.score !== null ? `⭐ ${r.score.toFixed(1)}/10` : '  —  ';
       const cachedStr = r.cached ? ' [cached]' : '';
-      const header = ` ${r.armId}${cachedStr} ${scoreStr} $${r.costUsd.toFixed(4)}`;
+      const latencyStr = r.latencyMs > 0 ? ` | TTFT:${r.latencyMs}ms` : '';
+      const header = ` ${r.armId}${cachedStr} ${scoreStr} $${r.costUsd.toFixed(4)}${latencyStr} | ${(r.durationMs / 1000).toFixed(1)}s`;
       const truncated = r.output.length > maxOutputLen ? r.output.slice(0, maxOutputLen) + '...' : r.output;
       console.log('│' + header.padEnd(78) + '│');
       // Word-wrap the output

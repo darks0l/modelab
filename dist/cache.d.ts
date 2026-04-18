@@ -15,6 +15,7 @@ export interface CacheEntry {
     modelKey: string;
     armId: string;
     durationMs: number;
+    latencyMs: number;
 }
 export declare class Cache {
     private readonly path;
