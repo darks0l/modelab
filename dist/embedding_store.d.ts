@@ -49,10 +49,19 @@ export declare class EmbeddingStore {
     private openDb;
     private initSchema;
     /**
+     * Synchronous version of storeRunEmbedding for testing.
+     * Computes TF-IDF embedding and inserts immediately.
+     */
+    storeRunEmbeddingSync(runId: string, goalText: string, summaryText: string): void;
+    /**
      * Store an embedding for a run. Non-blocking — kicks off async job.
      * Call storeRunEmbedding() and forget about it.
      */
     storeRunEmbedding(runId: string, goalText: string, summaryText: string): void;
+    /**
+     * Synchronous version of storeLessonEmbedding for testing.
+     */
+    storeLessonEmbeddingSync(lessonText: string): number;
     /**
      * Store an embedding for a lesson. Non-blocking.
      */

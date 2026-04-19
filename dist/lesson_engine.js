@@ -54,9 +54,9 @@ export function resetLessonEngine() {
     _instance = null;
 }
 // ── Keyword extractors ───────────────────────────────────────────────────────
-const CODE_KEYWORDS = /\b(code|function|refactor|bug|fix|test|build|repo|pull.request|typescript|javascript|python|rust|compile|lint)\b/i;
-const REASON_KEYWORDS = /\b(reason|proof|logic|analysis|theorem|prove|conjecture|derive|evaluate|compare|critique|glm-[45]|glm[45])\b/i;
-const QUICK_KEYWORDS = /\b(quick|summary|brief|what.is|define|lookup)\b/i;
+const CODE_KEYWORDS = /\b(code|function|refactor|bug|fix|test|build|repo|pull.?request|pr|typescript|javascript|python|rust|compile|lint|eslint|prettier|npm|yarn|cargo)\b/i;
+const REASON_KEYWORDS = /\b(reason|proof|logic|analysis|analyze|theorem|prove|conjecture|derive|evaluate|compare|contrast|critique|synthesis|reasoning(?:\.step)?|step\.by\.step|glm-(?:5|4\.7|5\.1|5\.0)|glm(?:5|4\.7|5\.1|5\.0|4))\b/i;
+const QUICK_KEYWORDS = /\b(quick|small|summary|brief|one.?liner|quick.?summary|what is|define|lookup)\b/i;
 function inferTaskType(question) {
     if (CODE_KEYWORDS.test(question))
         return 'coding';

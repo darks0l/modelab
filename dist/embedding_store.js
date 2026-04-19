@@ -187,6 +187,19 @@ export class EmbeddingStore {
     }
     // ── Public API ────────────────────────────────────────────────────────────
     /**
+     * Synchronous version of storeRunEmbedding for testing.
+     * Computes TF-IDF embedding and inserts immediately.
+     */
+    storeRunEmbeddingSync(runId, goalText, summaryText) {
+        const text = `${goalText}\n${summaryText}`.trim();
+        const embedding = new TfIdfVector(text); // always sync TF-IDF for testing
+        const stmt = this.db.prepare(`
+      INSERT OR REPLACE INTO run_embeddings (run_id, embedding, summary_text, goal_text, vector_type, created_at)
+      VALUES (?, ?, ?, ?, ?, datetime('now'))
+    `);
+        stmt.run(runId, embedding.toBlob(), summaryText, goalText, 'tfidf');
+    }
+    /**
      * Store an embedding for a run. Non-blocking — kicks off async job.
      * Call storeRunEmbedding() and forget about it.
      */
@@ -203,6 +216,18 @@ export class EmbeddingStore {
       `);
             stmt.run(runId, embedding.toBlob(), summaryText, goalText, embedding instanceof OllamaVector ? 'ollama' : 'tfidf');
         });
+    }
+    /**
+     * Synchronous version of storeLessonEmbedding for testing.
+     */
+    storeLessonEmbeddingSync(lessonText) {
+        const embedding = new TfIdfVector(lessonText);
+        const stmt = this.db.prepare(`
+      INSERT INTO lesson_embeddings (embedding, lesson_text, vector_type, created_at)
+      VALUES (?, ?, ?, datetime('now'))
+    `);
+        const info = stmt.run(embedding.toBlob(), lessonText, 'tfidf');
+        return info.lastInsertRowid;
     }
     /**
      * Store an embedding for a lesson. Non-blocking.

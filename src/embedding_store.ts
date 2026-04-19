@@ -156,6 +156,13 @@ class TfIdfVector implements EmbeddingVector {
     return Buffer.from(JSON.stringify(obj), 'utf8');
   }
 
+  /** Reconstruct a TfIdfVector from a stored blob (after JSON parse). */
+  static fromBlob(obj: Record<string, number>): TfIdfVector {
+    const vec = new Map<number, number>();
+    for (const [k, v] of Object.entries(obj)) vec.set(parseInt(k), v);
+    return Object.setPrototypeOf({ vector: vec, dimension: 2048 }, TfIdfVector.prototype) as TfIdfVector;
+  }
+
   cosineSimilarity(other: EmbeddingVector): number {
     if (!(other instanceof TfIdfVector)) return 0;
     let dot = 0;
@@ -253,6 +260,20 @@ export class EmbeddingStore {
   // ── Public API ────────────────────────────────────────────────────────────
 
   /**
+   * Synchronous version of storeRunEmbedding for testing.
+   * Computes TF-IDF embedding and inserts immediately.
+   */
+  storeRunEmbeddingSync(runId: string, goalText: string, summaryText: string): void {
+    const text = `${goalText}\n${summaryText}`.trim();
+    const embedding = new TfIdfVector(text); // always sync TF-IDF for testing
+    const stmt = this.db.prepare(`
+      INSERT OR REPLACE INTO run_embeddings (run_id, embedding, summary_text, goal_text, vector_type, created_at)
+      VALUES (?, ?, ?, ?, ?, datetime('now'))
+    `);
+    stmt.run(runId, embedding.toBlob(), summaryText, goalText, 'tfidf');
+  }
+
+  /**
    * Store an embedding for a run. Non-blocking — kicks off async job.
    * Call storeRunEmbedding() and forget about it.
    */
@@ -269,6 +290,19 @@ export class EmbeddingStore {
       `);
       stmt.run(runId, embedding.toBlob(), summaryText, goalText, embedding instanceof OllamaVector ? 'ollama' : 'tfidf');
     });
+  }
+
+  /**
+   * Synchronous version of storeLessonEmbedding for testing.
+   */
+  storeLessonEmbeddingSync(lessonText: string): number {
+    const embedding = new TfIdfVector(lessonText);
+    const stmt = this.db.prepare(`
+      INSERT INTO lesson_embeddings (embedding, lesson_text, vector_type, created_at)
+      VALUES (?, ?, ?, datetime('now'))
+    `);
+    const info = stmt.run(embedding.toBlob(), lessonText, 'tfidf');
+    return info.lastInsertRowid as number;
   }
 
   /**
@@ -412,11 +446,7 @@ export class EmbeddingStore {
         return new OllamaVector(Array.from(arr));
       } else {
         const obj = JSON.parse(blob.toString('utf8')) as Record<string, number>;
-        const vec = new Map<number, number>();
-        for (const [k, v] of Object.entries(obj)) vec.set(parseInt(k), v);
-        // Reconstruct TfIdfVector from its internal map
-        const tfidf = Object.setPrototypeOf({ vector: vec, dimension: 2048 }, TfIdfVector.prototype);
-        return tfidf as unknown as TfIdfVector;
+        return TfIdfVector.fromBlob(obj);
       }
     } catch {
       return null;

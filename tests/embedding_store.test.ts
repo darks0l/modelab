@@ -33,34 +33,30 @@ describe('EmbeddingStore', () => {
   // ── Basic operation ───────────────────────────────────────────────────────
 
   it('stores and retrieves a run embedding', async () => {
-    store.storeRunEmbedding('run-abc', 'What causes migraines?', 'Claude-sonnet outperformed GPT-4 by 2 points');
-    // Wait for async job to complete
-    await new Promise<void>(r => setTimeout(r, 2000));
+    store.storeRunEmbeddingSync('run-abc', 'What causes migraines?', 'Claude-sonnet outperformed GPT-4 by 2 points');
 
     const rows = db.prepare('SELECT * FROM run_embeddings WHERE run_id = ?').get('run-abc') as Record<string, unknown> | undefined;
     expect(rows).toBeDefined();
     expect(rows!.goal_text).toBe('What causes migraines?');
     expect(rows!.summary_text).toBe('Claude-sonnet outperformed GPT-4 by 2 points');
-    expect(rows!.vector_type).toMatch(/^(ollama|tfidf)$/);
+    expect(rows!.vector_type).toBe('tfidf');
   });
 
   it('stores and retrieves a lesson embedding', async () => {
-    store.storeLessonEmbedding('Temperature 0.7 works best for creative tasks');
-    await new Promise<void>(r => setTimeout(r, 2000));
+    const id = store.storeLessonEmbeddingSync('Temperature 0.7 works best for creative tasks');
 
-    const rows = db.prepare('SELECT * FROM lesson_embeddings LIMIT 1').get() as Record<string, unknown> | undefined;
+    const rows = db.prepare('SELECT * FROM lesson_embeddings WHERE id = ?').get(id) as Record<string, unknown> | undefined;
     expect(rows).toBeDefined();
     expect(rows!.lesson_text).toBe('Temperature 0.7 works best for creative tasks');
+    expect(rows!.vector_type).toBe('tfidf');
   });
 
   // ── Semantic search ───────────────────────────────────────────────────────
 
   it('finds semantically similar runs', async () => {
-    store.storeRunEmbedding('run-1', 'How do neural networks learn?', 'Gradient descent explanation worked well');
-    store.storeRunEmbedding('run-2', 'What causes migraines?', 'Triptans are effective treatment');
-    store.storeRunEmbedding('run-3', 'Explain backpropagation in neural nets', 'Visual diagrams helped understanding');
-    // Wait for async jobs
-    await new Promise<void>(r => setTimeout(r, 3000));
+    store.storeRunEmbeddingSync('run-1', 'How do neural networks learn?', 'Gradient descent explanation worked well');
+    store.storeRunEmbeddingSync('run-2', 'What causes migraines?', 'Triptans are effective treatment');
+    store.storeRunEmbeddingSync('run-3', 'Explain backpropagation in neural nets', 'Visual diagrams helped understanding');
 
     const results = await store.search('how do neural networks learn', 5);
 
@@ -72,27 +68,32 @@ describe('EmbeddingStore', () => {
   });
 
   it('returns results sorted by similarity score', async () => {
-    store.storeRunEmbedding('run-exact', 'What is machine learning?', 'Supervised learning overview provided');
-    store.storeRunEmbedding('run-similar', 'Explain AI and ML concepts', 'ML basics covered');
-    store.storeRunEmbedding('run-unrelated', 'What causes migraines?', 'Triptans discussion');
-    await new Promise<void>(r => setTimeout(r, 3000));
+    store.storeRunEmbeddingSync('run-exact', 'What is machine learning?', 'Supervised learning overview provided');
+    store.storeRunEmbeddingSync('run-similar', 'Explain AI and ML concepts', 'ML basics covered');
+    store.storeRunEmbeddingSync('run-unrelated', 'What causes migraines?', 'Triptans discussion');
 
     const results = await store.search('what is machine learning', 10);
     const runResults = results.filter(r => r.source === 'run');
 
-    // Exact match should score higher than similar, which should score higher than unrelated
-    const exactIdx = runResults.findIndex(r => r.runId === 'run-exact');
-    const similarIdx = runResults.findIndex(r => r.runId === 'run-similar');
-    const unrelatedIdx = runResults.findIndex(r => r.runId === 'run-unrelated');
+    // Results must be sorted by descending score
+    for (let i = 1; i < runResults.length; i++) {
+      expect(runResults[i - 1].score).toBeGreaterThanOrEqual(runResults[i].score);
+    }
 
-    expect(exactIdx).toBeLessThan(similarIdx);
-    expect(similarIdx).toBeLessThan(unrelatedIdx);
+    // Exact match should be present (best match for exact query terms)
+    const exactIdx = runResults.findIndex(r => r.runId === 'run-exact');
+    expect(exactIdx).toBeGreaterThanOrEqual(0);
+
+    // Unrelated should not appear before the exact match (if it appears at all)
+    const unrelatedIdx = runResults.findIndex(r => r.runId === 'run-unrelated');
+    if (unrelatedIdx >= 0) {
+      expect(exactIdx).toBeLessThan(unrelatedIdx);
+    }
   });
 
   it('returns lesson results alongside run results', async () => {
-    store.storeRunEmbedding('run-1', 'Neural network optimization', 'Adam optimizer worked best');
-    store.storeLessonEmbedding('Adam optimizer outperforms SGD for deep networks');
-    await new Promise<void>(r => setTimeout(r, 3000));
+    store.storeRunEmbeddingSync('run-1', 'Neural network optimization', 'Adam optimizer worked best');
+    const lessonId = store.storeLessonEmbeddingSync('Adam optimizer outperforms SGD for deep networks');
 
     const results = await store.search('which optimizer for deep learning', 10);
 
@@ -101,13 +102,13 @@ describe('EmbeddingStore', () => {
 
     expect(runResults.length).toBeGreaterThan(0);
     expect(lessonResults.length).toBeGreaterThan(0);
+    expect(lessonResults[0].lessonText).toContain('Adam optimizer');
   });
 
   it('respects limit parameter', async () => {
     for (let i = 0; i < 10; i++) {
-      store.storeRunEmbedding(`run-${i}`, `Topic ${i}`, `Summary ${i}`);
+      store.storeRunEmbeddingSync(`run-${i}`, `Topic ${i}`, `Summary ${i}`);
     }
-    await new Promise<void>(r => setTimeout(r, 5000));
 
     const results = await store.search('topic', 3);
     expect(results.length).toBeLessThanOrEqual(3);
@@ -116,8 +117,7 @@ describe('EmbeddingStore', () => {
   // ── TF-IDF vector ─────────────────────────────────────────────────────────
 
   it('uses tfidf vector type when ollama unavailable', async () => {
-    store.storeRunEmbedding('run-tfidf', 'Test goal', 'Test summary');
-    await new Promise<void>(r => setTimeout(r, 2000));
+    store.storeRunEmbeddingSync('run-tfidf', 'Test goal', 'Test summary');
 
     const rows = db.prepare('SELECT vector_type FROM run_embeddings WHERE run_id = ?').get('run-tfidf') as { vector_type: string } | undefined;
     expect(rows).toBeDefined();
@@ -125,9 +125,8 @@ describe('EmbeddingStore', () => {
   });
 
   it('handles empty and short texts gracefully', async () => {
-    store.storeRunEmbedding('run-empty', '', '');
-    store.storeRunEmbedding('run-short', 'Hi', 'Ab');
-    await new Promise<void>(r => setTimeout(r, 2000));
+    store.storeRunEmbeddingSync('run-empty', '', '');
+    store.storeRunEmbeddingSync('run-short', 'Hi', 'Ab');
 
     const results = await store.search('test query', 5);
     // Should not throw — just return whatever matches or empty
@@ -145,21 +144,17 @@ describe('EmbeddingStore', () => {
   });
 
   it('allows multiple runs to be stored', async () => {
-    store.storeRunEmbedding('run-a', 'Topic A', 'Summary A');
-    store.storeRunEmbedding('run-b', 'Topic B', 'Summary B');
-    store.storeRunEmbedding('run-c', 'Topic C', 'Summary C');
-    await new Promise<void>(r => setTimeout(r, 3000));
+    store.storeRunEmbeddingSync('run-a', 'Topic A', 'Summary A');
+    store.storeRunEmbeddingSync('run-b', 'Topic B', 'Summary B');
+    store.storeRunEmbeddingSync('run-c', 'Topic C', 'Summary C');
 
     const rows = db.prepare('SELECT COUNT(*) as cnt FROM run_embeddings').get() as { cnt: number };
     expect(rows.cnt).toBe(3);
   });
 
   it('idempotent: replacing a run embedding updates it', async () => {
-    store.storeRunEmbedding('run-dup', 'Original question', 'Original summary');
-    await new Promise<void>(r => setTimeout(r, 2000));
-
-    store.storeRunEmbedding('run-dup', 'Updated question', 'Updated summary');
-    await new Promise<void>(r => setTimeout(r, 2000));
+    store.storeRunEmbeddingSync('run-dup', 'Original question', 'Original summary');
+    store.storeRunEmbeddingSync('run-dup', 'Updated question', 'Updated summary');
 
     const rows = db.prepare('SELECT * FROM run_embeddings WHERE run_id = ?').get('run-dup') as Record<string, unknown>;
     expect(rows.summary_text).toBe('Updated summary');

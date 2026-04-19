@@ -5,9 +5,9 @@ import type { ModelConfig } from './types.js';
  */
 export type TaskComplexity = 'quick' | 'balanced' | 'reasoning' | 'coding';
 
-const CODE_KEYWORDS = /\b(code|function|refactor|bug|fix|test|build|repo|pull.request|pr\b|typescript|javascript|python|rust|compile|lint|eslint|prettier|npm|yarn|cargo)\b/i;
-const REASON_KEYWORDS = /\b(reason|proof|logic|analysis|analyze|theorem|prove|conjecture|derive|evaluate|compare|contrast|critique|synthesis|reasoning.step|step.by.step|glm-5|glm5|glm-4.7|glm4.7|glm-5.1|glm5.1|glm-5.0|glm5.0|glm4\b)\b/i;
-const QUICK_KEYWORDS = /\b(quick|small|summary|brief|one.liner|quick.summary|what.is|define|lookup)\b/i;
+const CODE_KEYWORDS = /\b(code|function|refactor|bug|fix|test|build|repo|pull.?request|pr\b|typescript|javascript|python|rust|compile|lint|eslint|prettier|npm|yarn|cargo)\b/i;
+const REASON_KEYWORDS = /\b(reasoning|reason|proof|logic|analysis|analyze|theorem|prove|conjecture|derive|evaluate|compare|contrast|critique|synthesis|step.by.step|glm-(?:5|4.7|5.1|5.0)|glm(?:5|4.7|5.1|5.0|4))\b/i;
+const QUICK_KEYWORDS = /\b(quick|small|summary|brief|one.?liner|quick.?summary|what.?is|define|lookup)\b/i;
 
 export function estimateComplexity(task: string): TaskComplexity {
   if (CODE_KEYWORDS.test(task)) return 'coding';
