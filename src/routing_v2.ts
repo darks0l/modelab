@@ -9,6 +9,7 @@
 
 import type { ModelConfig, ExperimentResult } from './types.js';
 import { ExperimentMemory } from './memory.js';
+import { getLessonEngine } from './lesson_engine.js';
 
 // ── Task Profile ─────────────────────────────────────────────────────────────
 
@@ -357,6 +358,15 @@ export function routeTaskV2(
 
   // 3. Build model profiles from history
   const modelProfiles = buildModelProfiles(modelConfigs, memory);
+
+  // 3b. Apply learned adjustments from lesson_engine (router_adjustments table)
+  const lesson = getLessonEngine();
+  for (const profile of modelProfiles) {
+    const adj = lesson.resolveAdjustments(profile.key);
+    if (adj.delta !== 0) {
+      profile.avgScore = Math.max(0, Math.min(10, profile.avgScore + adj.delta));
+    }
+  }
 
   // 4. Find similar past runs for history boosting
   const pastRuns = findSimilarPastRuns(task, memory);

@@ -6,6 +6,7 @@
  *
  * Key idea: routing should LEARN from past runs, not just match keywords.
  */
+import { getLessonEngine } from './lesson_engine.js';
 // ── Task profiling helpers ───────────────────────────────────────────────────
 const TASK_TYPE_KEYWORDS = {
     code: /\b(code|function|class|method|refactor|bug|fix|test|build|repo|pull.request|pr\b|typescript|javascript|python|rust|compile|lint|eslint|prettier|npm|yarn|cargo|script|algorithm|implement|debug)\b/i,
@@ -247,6 +248,14 @@ export function routeTaskV2(task, modelConfigs, mode = 'quality', memory) {
     const fallbackDecision = oldRoute(task, modelConfigs, mode);
     // 3. Build model profiles from history
     const modelProfiles = buildModelProfiles(modelConfigs, memory);
+    // 3b. Apply learned adjustments from lesson_engine (router_adjustments table)
+    const lesson = getLessonEngine();
+    for (const profile of modelProfiles) {
+        const adj = lesson.resolveAdjustments(profile.key);
+        if (adj.delta !== 0) {
+            profile.avgScore = Math.max(0, Math.min(10, profile.avgScore + adj.delta));
+        }
+    }
     // 4. Find similar past runs for history boosting
     const pastRuns = findSimilarPastRuns(task, memory);
     // 5. Score each model for this task
