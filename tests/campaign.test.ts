@@ -181,8 +181,10 @@ describe('CampaignManager', () => {
 
   // ── listCampaigns ──────────────────────────────────────────────────────
 
-  it('lists all campaigns — most recent first', () => {
+  it('lists all campaigns — most recent first', async () => {
     const c1 = mgr.createCampaign({ question: 'First' });
+    // Small delay to ensure different timestamps
+    await new Promise(r => setTimeout(r, 1100));
     const c2 = mgr.createCampaign({ question: 'Second' });
     const list = mgr.listCampaigns();
     const ids = list.map((x: any) => x.id);
