@@ -9,6 +9,10 @@ export interface CacheEntry {
   /** Full SHA-256 hash of question:model:armId */
   hash: string;
   output: string;
+  /** First 200 chars of output — for quick preview in tables/history */
+  outputPreview: string;
+  /** True if output was truncated (>200 chars stored) */
+  outputTruncated: boolean;
   score: number | null;
   costUsd: number;
   tokensUsed: { input: number; output: number };
@@ -57,9 +61,12 @@ export class Cache {
    * @param modelKey - the model config key, e.g. "fast", "balanced"
    */
   set(key: string, result: ExperimentResult, question: string, modelKey: string): void {
+    const outputPreview = result.output.slice(0, 200);
     const entry: CacheEntry = {
       hash: key,
       output: result.output,
+      outputPreview,
+      outputTruncated: result.output.length > 200,
       score: result.score,
       costUsd: result.costUsd,
       tokensUsed: result.tokensUsed,

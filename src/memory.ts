@@ -95,6 +95,8 @@ function openDb(): Database.Database {
       input_tokens INTEGER NOT NULL,
       output_tokens INTEGER NOT NULL,
       output       TEXT  NOT NULL,
+      output_preview TEXT  NOT NULL DEFAULT '',
+      output_truncated INTEGER NOT NULL DEFAULT 0,
       model        TEXT  NOT NULL,
       duration_ms  INTEGER NOT NULL,
       latency_ms   INTEGER NOT NULL DEFAULT 0,
@@ -165,6 +167,8 @@ export class ExperimentMemory {
           input_tokens INTEGER NOT NULL,
           output_tokens INTEGER NOT NULL,
           output       TEXT  NOT NULL,
+          output_preview TEXT  NOT NULL DEFAULT '',
+          output_truncated INTEGER NOT NULL DEFAULT 0,
           model        TEXT  NOT NULL,
           duration_ms  INTEGER NOT NULL,
           latency_ms   INTEGER NOT NULL DEFAULT 0,
@@ -222,16 +226,19 @@ export class ExperimentMemory {
     const stmt = this.db.prepare(`
       INSERT INTO experiments
         (id, run_id, goal_id, arm_id, score, cost_usd, input_tokens, output_tokens,
-         output, model, duration_ms, latency_ms, iteration, timestamp)
+         output, output_preview, output_truncated, model, duration_ms, latency_ms, iteration, timestamp)
       VALUES
-        (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
     stmt.run(
       `${armId(result.armId)}-${Date.now()}`,
       runId, goalId,
       result.armId, result.score, result.costUsd,
       result.tokensUsed.input, result.tokensUsed.output,
-      result.output, result.model,
+      result.output,
+      result.outputPreview ?? result.output.slice(0, 200),
+      result.outputTruncated ? 1 : 0,
+      result.model,
       result.durationMs, result.latencyMs ?? 0, result.iteration, result.timestamp
     );
   }
@@ -354,10 +361,12 @@ export class ExperimentMemory {
   }
 
   getContextForIteration(goalId: string, runId: string, iter: number): IterationContext {
-    const priorSummaries = this.getSummaries(goalId, runId)
+    // Cross-run learning: pull summaries from ALL prior runs of this goal,
+    // not just the current run, so iteration N can learn from run N-1's outcomes.
+    const priorSummaries = this.getSummaries(goalId)
       .filter(s => s.iteration < iter);
     const allPrior = this.getHistory(goalId)
-      .filter(r => r.runId === runId && r.iteration < iter);
+      .filter(r => r.iteration < iter);
     const bestOverall = allPrior
       .filter(r => r.score !== null)
       .sort((a, b) => (b.score ?? 0) - (a.score ?? 0))[0] ?? null;
@@ -620,12 +629,15 @@ function mapSummaryRow(r: SummaryRow): IterationSummary {
 interface DbRow {
   id: string; run_id: string; goal_id: string; arm_id: string; model: string;
   score: number | null; cost_usd: number; input_tokens: number; output_tokens: number;
-  output: string; duration_ms: number; latency_ms: number; iteration: number; timestamp: string;
+  output: string; output_preview: string; output_truncated: number;
+  duration_ms: number; latency_ms: number; iteration: number; timestamp: string;
 }
 
 function mapRow(r: DbRow): ExperimentResult {
   return {
     armId: r.arm_id, model: r.model, output: r.output,
+    outputPreview: r.output_preview,
+    outputTruncated: Boolean(r.output_truncated),
     score: r.score ?? null, costUsd: r.cost_usd,
     tokensUsed: { input: r.input_tokens, output: r.output_tokens },
     durationMs: r.duration_ms, latencyMs: r.latency_ms ?? 0,

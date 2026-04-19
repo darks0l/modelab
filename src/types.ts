@@ -67,6 +67,10 @@ export interface ExperimentResult {
   /** The model config key used for this arm (e.g. "balanced", "fast", "reasoning") */
   model: string;
   output: string;
+  /** First 200 chars of output — for quick preview in tables/history */
+  outputPreview: string;
+  /** True if output was truncated (>200 chars stored) */
+  outputTruncated: boolean;
   score: number | null;
   /** If scoring/parsing failed, this is the error message */
   scoreError?: string | null;

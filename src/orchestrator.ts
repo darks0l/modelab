@@ -302,6 +302,8 @@ export class ResearchOrchestrator {
       armId: arm.id,
       model: arm.model,
       output,
+      outputPreview: output.slice(0, 200),
+      outputTruncated: output.length > 200,
       score,
       scoreError,
       costUsd: Math.round(costUsd * 1e6) / 1e6,
