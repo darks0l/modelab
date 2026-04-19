@@ -2,6 +2,11 @@
 
 All notable changes to this project are documented in this file.
 
+## v0.4.3
+
+- fix: routing_v2 scope issue — lessonEngine.getActiveAdjustments/resolveAdjustments now called in correct function scope (was hoisted to top-level module scope)
+- feat: routing_v2 reads lesson_engine adjustments — learned router_adjustments from SQLite are now applied to model scores in routeTaskV2
+
 ## v0.4.2
 
 - fix: cli.ts — goal possibly undefined bug in cmdRecall (nullish coalescing fix)
