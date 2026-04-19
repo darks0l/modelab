@@ -6,7 +6,7 @@
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "bin": {
-    "modelab": "./dist/cli.js"
+    "modelab": "./bin/modelab"
   },
   "scripts": {
     "build": "tsc && node scripts/fix-bin.js",
