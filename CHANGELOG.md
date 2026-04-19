@@ -2,37 +2,57 @@
 
 All notable changes to this project are documented in this file.
 
-## v0.3.7
+## v0.3.11
+
+- feat: GLM-5.0 router keywords (`glm`, `glm-5`, `glm5`, `智谱`, `zhipu`)
+- feat: cross-run learning — `outputPreview` and `outputTruncated` stored in ExperimentResult, cache, and memory DB
+- feat: cross-run learning — LCM Memory v2 with iteration summaries, run summaries, and cross-iteration context injection
+- fix: bin entry for npm publish (fix-bin.js script, ./bin/modelab.js wrapper)
+- docs: README overhaul for v0.3 — research OS positioning, all features documented
+
+## v0.3.10
 
 - feat: LCM memory v2 — iteration summaries, run summaries, cross-run persistence
 - feat: scorer handles optional sub-fields (clarity/correctness/completeness)
 - feat: new CLI commands — `modelab experiments` (all runs summary) and `modelab review <run-id>` (detailed run view)
 - fix: iteration_context template variable bug
 
-## v0.3.6
+## v0.3.9
 
 - feat: add GLM 5.1 model support
 
-## v0.3.5
+## v0.3.8
 
 - feat: TTFT latency stats in run summaries, reports, and comparison table
 
-## v0.3.4
+## v0.3.7
 
 - feat: proactive rate-limit backoff via RateLimitTracker
 
-## v0.3.3
+## v0.3.6
 
 - feat: replace length/4 token estimation with tiktoken gpt2 encoder
 
-## v0.3.2
-
-- GLM 5.1 audit spawned (in-repo)
-
-## v0.3.1
+## v0.3.5
 
 - feat: enforce structured JSON output in scorer with Zod validation + retry on parse failure
 - feat: scoreError field, score cache, pre-check cost guard
+
+## v0.3.4
+
+- feat: retry+timeout on all API calls, full SHA-256 cache hash, error logging, cache entry modelKey field
+
+## v0.3.3
+
+- feat: cross-iteration learning — summarize + inject prior lessons into prompts
+
+## v0.3.2
+
+- fix: bin shebang for npm publish
+
+## v0.3.1
+
+- fix: cross-platform bin entry
 
 ## v0.3.0
 
