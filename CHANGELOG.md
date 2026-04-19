@@ -2,6 +2,13 @@
 
 All notable changes to this project are documented in this file.
 
+## v0.4.2
+
+- fix: cli.ts — goal possibly undefined bug in cmdRecall (nullish coalescing fix)
+- fix: orchestrator.ts — wrong import path for estimateComplexity (complexity.ts, not lesson_engine.ts)
+- feat: orchestrator self-iteration hook — calls lessonEngine.updateProfiles() + processRunLesson() after each run; stores run embeddings via embeddingStore
+- feat: modelab recall CLI — semantic search across run results and lessons with relevance scoring
+
 ## v0.4.1
 
 - fix: TF-IDF blob round-trip — TfIdfVector.fromBlob() for proper deserialization (was returning null on read-back)
