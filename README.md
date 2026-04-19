@@ -31,16 +31,20 @@ modelab run --goal "Compare Postgres vs DynamoDB for a startup" --format html --
 
 ---
 
-## What's new in v0.2
+## What's new in v0.3
 
+- **LCM Memory v2** — iteration/run summaries with cross-run persistence and cross-iteration learning
+- **Tiktoken encoding** — accurate token counting with GPT-2 vocab tokenizer
+- **Proactive rate-limit backoff** — RateLimitTracker avoids hitting provider limits
+- **TTFT latency stats** — time-to-first-token tracked per arm, reported in summaries
+- **Experiments view** — `modelab experiments --sort score|cost|date` for all runs at a glance
+- **Review command** — `modelab review <run-id>` for deep-dive latency + lesson breakdown
 - **Streaming output** — watch tokens arrive in real-time with `--stream`
-- **Side-by-side comparison table** — all arms compared in one view
 - **Hash-based caching** — skip re-runs of the same question+model+arm
 - **Multi-format export** — `json`, `md`, `html` with dark/light themes
-- **8 model providers** — OpenAI, Anthropic, Ollama, Groq, Gemini, Perplexity, MiniMax, OpenRouter
+- **10 model providers** — OpenAI, Anthropic, Ollama, Groq, Gemini, Perplexity, MiniMax, OpenRouter, GLM 5.1, DeepSeek
 - **7 built-in templates** — research, code-review, architecture, bug-hunt, compare, quick-answer, creative
-- **Structured scorer** — rubric breakdown: clarity + correctness + completeness
-- **Persistent cache** — 7-day TTL, `modelab cache --clear` to wipe
+- **Structured scorer** — rubric breakdown with graceful optional sub-fields
 
 ---
 
