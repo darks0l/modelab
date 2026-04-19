@@ -42,5 +42,7 @@ export declare class Cache {
     private persist;
     clear(): void;
     size(): number;
+    /** No-op — kept for API compatibility with EmbeddingStore.close() pattern */
+    close(): void;
 }
 //# sourceMappingURL=cache.d.ts.map

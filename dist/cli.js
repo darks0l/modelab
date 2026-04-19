@@ -7,9 +7,11 @@ import { z } from 'zod';
 import { ResearchOrchestrator } from './orchestrator.js';
 import { ExperimentMemory } from './memory.js';
 import { Cache } from './cache.js';
-import { routeTask } from './router.js';
+import { routeTaskV2, formatRoutingDecisionV2, formatModelProfile } from './routing_v2.js';
+import { getLessonEngine } from './lesson_engine.js';
 import { getTemplate, listTemplates } from './templates.js';
 import { exportRun } from './export.js';
+import { CampaignManager, SELF_IMPROVEMENT_CAMPAIGN } from './campaign.js';
 const CONFIG_PATH = join(homedir(), '.modelab', 'config.json');
 const CACHE_TTL = 7 * 24 * 60 * 60 * 1000; // 7 days
 // ── Config Schema ──────────────────────────────────────────────────────────
@@ -81,12 +83,15 @@ USAGE
   modelab config --init                   Create default config
   modelab config --list                   Show current config
   modelab cache --clear                   Clear the result cache
-  modelab route --task <text> [--mode quality|latency|cost]  Show model routing decision
+  modelab route --task <text> [--mode quality|latency|cost]  Show learned routing decision (v2)
+  modelab profile <model-key>                  Show performance profile for a model
   modelab lessons [--goal-id <id>]        Show what the system learned across runs
   modelab stats [--goal-id <id>]           Show aggregate statistics (runs, cost, scores, latency)
   modelab experiments [--limit N] [--sort date|score|cost]  List all runs with summary stats
   modelab review [run-id]                 Interactive run review (full latency + lesson breakdown)
   modelab iterations [run-id] [--goal-id <id>]  Per-iteration breakdown (scores, TTFT, lessons)
+  modelab recall <query>                  Semantic search over past runs and lessons
+  modelab campaign [subcommand]            Multi-run research campaigns (see CAMPAIGNS below)
   modelab --help                          Show this help
 
 RUN OPTIONS
@@ -105,7 +110,7 @@ RUN OPTIONS
 
 ROUTING MODES
   modelab route --task <text> --mode latency
-                           Route for minimum latency (uses 'fast' model)
+                           Route for minimum latency (learns from latency history)
   modelab route --task <text> --mode cost
                            Route for minimum cost
 
@@ -115,6 +120,21 @@ EXAMPLES
   modelab run --goal "Compare Postgres vs DynamoDB" --template compare --arms balanced,reasoning
   modelab run --goal "Write a short poem" --temperature-sweep 0,0.3,0.7,1.0 --arms balanced
   modelab export run-abc123 --format html --output report.html
+
+CAMPAIGNS (multi-run research)
+  modelab campaign new "<question>" [--hypothesis "<text>"] [--runs N]
+                           Create a multi-run research campaign
+  modelab campaign run <id>   Run the next experiment in a campaign
+  modelab campaign status [id]  Show campaign status (all if no id)
+  modelab campaign report <id>  Full report with all runs and synthesis
+  modelab campaign self       Create the self-improvement campaign
+  modelab campaign self-run   Run the next self-improvement experiment
+  modelab campaign synthesize <id>  Force re-synthesis of findings
+  modelab campaigns           List all campaigns
+
+CAMPAIGN EXAMPLES
+  modelab campaign new "Does temperature affect code quality?" --hypothesis "Lower temp = better code" --runs 5
+  modelab campaign self-run    (modelab improves itself through structured experimentation)
 
 ENVIRONMENT
   OPENAI_API_KEY        OpenAI / Groq / OpenRouter models
@@ -771,11 +791,46 @@ function cmdRoute(args) {
     const modeArg = extractArg(args, '--mode') ?? 'quality';
     const mode = (['quality', 'latency', 'cost'].includes(modeArg) ? modeArg : 'quality');
     const config = loadConfig();
-    const routed = routeTask(task, config.models, mode);
-    console.log(`\nTask: "${task}"`);
-    console.log(`Mode: ${mode}`);
-    console.log(`Routed to: ${routed.model} (${routed.provider})`);
-    console.log(`Reasoning: ${routed.reasoning}`);
+    const memory = new ExperimentMemory();
+    // Use learned routing v2 — falls back to keyword router if no history
+    const routed = routeTaskV2(task, config.models, mode, memory);
+    console.log(formatRoutingDecisionV2(routed));
+    memory.close();
+}
+function cmdProfile(args) {
+    const modelKey = extractArg(args, '--model') ?? args.filter(a => !a.startsWith('--'))[0];
+    if (!modelKey) {
+        console.error('❌ Usage: modelab profile <model-key>  (e.g. modelab profile balanced)');
+        process.exit(1);
+    }
+    const config = loadConfig();
+    if (!config.models[modelKey]) {
+        console.error(`❌ Unknown model key: "${modelKey}". Available: ${Object.keys(config.models).join(', ')}`);
+        process.exit(1);
+    }
+    const cfg = config.models[modelKey];
+    const engine = getLessonEngine();
+    const dbProfile = engine.getProfile(modelKey);
+    if (dbProfile) {
+        console.log(formatModelProfile({
+            key: modelKey,
+            provider: cfg.provider,
+            model: cfg.model,
+            avgScore: dbProfile.avgScore,
+            avgLatencyMs: dbProfile.avgLatencyMs,
+            avgCostUsd: dbProfile.avgCostUsd,
+            strengths: dbProfile.strengths,
+            weaknesses: dbProfile.weaknesses,
+            sampleSize: dbProfile.runsCount,
+        }));
+    }
+    else {
+        console.log(formatModelProfile({
+            key: modelKey, provider: cfg.provider, model: cfg.model,
+            avgScore: 5, avgLatencyMs: null, avgCostUsd: null,
+            strengths: [], weaknesses: [], sampleSize: 0,
+        }));
+    }
 }
 function cmdCache(args) {
     if (args.includes('--clear')) {
@@ -814,6 +869,9 @@ switch (subcommand) {
         break;
     case 'route':
         cmdRoute(subArgs);
+        break;
+    case 'profile':
+        cmdProfile(subArgs);
         break;
     case 'cache':
         cmdCache(subArgs);
@@ -1077,6 +1135,417 @@ async function cmdExperiments(args) {
     memory.close();
 }
 // ── Review (detailed single-run view) ───────────────────────────────────────────
+// ── Campaign Commands ──────────────────────────────────────────────────────────
+function extractCampaignArg(args, key) {
+    const idx = args.indexOf(key);
+    return idx !== -1 && idx + 1 < args.length ? args[idx + 1] : undefined;
+}
+/**
+ * modelab campaign new "<question>" [--hypothesis "<hypothesis>"] [--runs N]
+ * Create a new research campaign.
+ */
+async function cmdCampaignNew(args) {
+    const question = args[0];
+    if (!question) {
+        console.error('Usage: modelab campaign new "<question>" [--hypothesis "<hypothesis>"] [--runs N]');
+        process.exit(1);
+    }
+    const hypothesis = extractCampaignArg(args, '--hypothesis') ?? '';
+    const maxRuns = parseInt(extractCampaignArg(args, '--runs') ?? '5', 10);
+    const config = loadConfig();
+    const mgr = new CampaignManager(config);
+    const campaign = mgr.createCampaign({ question, hypothesis, maxRuns });
+    console.log(`\n🎯 Campaign created: ${campaign.id}`);
+    console.log(`   Question: ${campaign.question}`);
+    if (campaign.hypothesis)
+        console.log(`   Hypothesis: ${campaign.hypothesis}`);
+    console.log(`   Max runs: ${campaign.max_runs}`);
+    console.log(`   Status: ${campaign.status}`);
+    console.log('\nRun the next experiment: modelab campaign run', campaign.id);
+    mgr.close();
+}
+/**
+ * modelab campaign run <campaign_id>
+ * Run the next experiment in the campaign.
+ */
+async function cmdCampaignRun(args) {
+    const campaignId = args.find(a => !a.startsWith('--'));
+    if (!campaignId) {
+        console.error('Usage: modelab campaign run <campaign_id>');
+        process.exit(1);
+    }
+    const config = loadConfig();
+    const mgr = new CampaignManager(config);
+    const campaign = mgr.getCampaign(campaignId);
+    if (!campaign) {
+        console.error(`❌ Campaign not found: ${campaignId}`);
+        mgr.close();
+        process.exit(1);
+    }
+    const modelKeys = Object.keys(config.models);
+    const arms = modelKeys.slice(0, Math.min(modelKeys.length, 3)).map((key, i) => ({
+        id: `camp-arm-${i + 1}`,
+        name: `${key} (${config.models[key].provider})`,
+        promptTemplate: `You are a research assistant.\n\nGoal: {{goal}}\nQuestion: {{question}}\n\n{{iteration_context}}\n\nProvide a thorough, well-reasoned response.`,
+        model: key,
+    }));
+    console.log(`\n🎯 Running campaign ${campaignId} (run #${campaign.total_runs + 1}/${campaign.max_runs})`);
+    console.log(`   Question: ${campaign.question}`);
+    if (campaign.hypothesis)
+        console.log(`   Hypothesis: ${campaign.hypothesis}`);
+    console.log(`   Arms: ${arms.map(a => a.id).join(', ')}\n`);
+    try {
+        const { campaign: updated, runLog, synthesis } = await mgr.runNext(campaignId, arms);
+        console.log(`\n🏁 Run complete`);
+        console.log(`   Campaign status: ${updated.status}`);
+        console.log(`   Total runs: ${updated.total_runs}/${updated.max_runs}`);
+        console.log(`   Cost so far: $${runLog.totalCostUsd.toFixed(4)}`);
+        if (runLog.bestResult) {
+            console.log(`   Best: ${runLog.bestResult.armId} — ⭐ ${runLog.bestResult.score}/10`);
+        }
+        console.log('\n📋 Synthesis:');
+        console.log(`   ${synthesis.finding}`);
+        console.log(`   Belief: ${synthesis.belief_change} | Confidence: ${(synthesis.confidence * 100).toFixed(0)}%`);
+        if (synthesis.next_run_recommendation) {
+            console.log(`   Next: ${synthesis.next_run_recommendation}`);
+        }
+        if (synthesis.stop_reason) {
+            console.log(`   Stop reason: ${synthesis.stop_reason}`);
+        }
+        if (updated.status === 'running' && updated.total_runs < updated.max_runs) {
+            console.log('\n   → Run the next experiment: modelab campaign run', campaignId);
+        }
+        else if (updated.status === 'complete') {
+            console.log('\n📊 Full report: modelab campaign report', campaignId);
+        }
+    }
+    catch (err) {
+        console.error(`❌ Campaign run failed:`, err);
+    }
+    mgr.close();
+}
+/**
+ * modelab campaign status [campaign_id]
+ * Show campaign progress and latest synthesis.
+ * If no id given, list all campaigns.
+ */
+async function cmdCampaignStatus(args) {
+    const campaignId = args.find(a => !a.startsWith('--'));
+    if (!campaignId) {
+        const config = loadConfig();
+        const mgr = new CampaignManager(config);
+        const statusFilter = extractCampaignArg(args, '--status');
+        const campaigns = mgr.listCampaigns(statusFilter);
+        if (campaigns.length === 0) {
+            console.log('\nNo campaigns yet. Create one: modelab campaign new "<question>" [--hypothesis "<hypothesis>"]');
+            mgr.close();
+            return;
+        }
+        console.log('\n');
+        console.log('  \x1b[36m\x1b[1m🎯 Campaigns\x1b[0m');
+        console.log('  ' + '─'.repeat(72));
+        for (const c of campaigns) {
+            const sc = c.status === 'complete' ? '\x1b[32m' : c.status === 'running' ? '\x1b[34m' : c.status === 'failed' ? '\x1b[31m' : '\x1b[33m';
+            console.log(`  ${sc}${c.status.padEnd(12)}\x1b[0m ${c.id}  runs:${c.total_runs}/${c.max_runs}  ${c.question.slice(0, 40)}`);
+        }
+        console.log('  ' + '─'.repeat(72));
+        console.log('\n  Detail: modelab campaign status <campaign_id>');
+        console.log('  Run next: modelab campaign run <campaign_id>');
+        mgr.close();
+        return;
+    }
+    const config = loadConfig();
+    const mgr = new CampaignManager(config);
+    const campaign = mgr.getCampaign(campaignId);
+    if (!campaign) {
+        console.error(`❌ Campaign not found: ${campaignId}`);
+        mgr.close();
+        process.exit(1);
+    }
+    const report = mgr.getReport(campaignId);
+    console.log('\n');
+    console.log(`  \x1b[36m\x1b[1m🎯 Campaign: ${campaign.id}\x1b[0m`);
+    console.log('  ' + '─'.repeat(72));
+    console.log(`  Status:      ${campaign.status}`);
+    console.log(`  Runs:        ${campaign.total_runs}/${campaign.max_runs}`);
+    console.log(`  Question:    ${campaign.question}`);
+    if (campaign.hypothesis)
+        console.log(`  Hypothesis:  ${campaign.hypothesis}`);
+    console.log(`  Created:     ${new Date(campaign.created_at).toLocaleString()}`);
+    console.log(`  Updated:     ${new Date(campaign.updated_at).toLocaleString()}`);
+    console.log('  ' + '─'.repeat(72));
+    if (report && report.runs.length > 0) {
+        console.log('\n  \x1b[1mRuns:\x1b[0m');
+        for (const run of report.runs) {
+            const scoreStr = run.bestScore !== null ? `\x1b[33m⭐ ${run.bestScore.toFixed(1)}/10\x1b[0m` : '  —  ';
+            console.log(`  #${run.sequenceOrder}  ${scoreStr}  ${run.bestArm ?? '?'}  $${run.totalCostUsd.toFixed(4)}  — ${run.finding.slice(0, 60)}…`);
+        }
+        console.log(`\n  Total cost: $${report.totalCostUsd.toFixed(4)}`);
+    }
+    if (campaign.findings) {
+        console.log('\n  \x1b[1mLatest finding:\x1b[0m');
+        console.log(`  ${campaign.findings}`);
+    }
+    console.log('\n  ' + '─'.repeat(72));
+    if (campaign.status === 'running') {
+        console.log('  Run next: modelab campaign run', campaignId);
+    }
+    console.log('  Full report: modelab campaign report', campaignId);
+    console.log('  Pause: modelab campaign pause', campaignId);
+    console.log('');
+    mgr.close();
+}
+/**
+ * modelab campaign report <campaign_id>
+ * Full campaign report with all runs and synthesized conclusion.
+ */
+async function cmdCampaignReport(args) {
+    const campaignId = args.find(a => !a.startsWith('--'));
+    if (!campaignId) {
+        console.error('Usage: modelab campaign report <campaign_id>');
+        process.exit(1);
+    }
+    const config = loadConfig();
+    const mgr = new CampaignManager(config);
+    const report = mgr.getReport(campaignId);
+    if (!report) {
+        console.error(`❌ Campaign not found: ${campaignId}`);
+        mgr.close();
+        process.exit(1);
+    }
+    const { campaign, runs, totalCostUsd } = report;
+    console.log('\n');
+    console.log(`  \x1b[36m\x1b[1m🎯 Campaign Report\x1b[0m — ${campaign.id}`);
+    console.log('  ' + '─'.repeat(76));
+    console.log(`  Question:    ${campaign.question}`);
+    if (campaign.hypothesis)
+        console.log(`  Hypothesis:  ${campaign.hypothesis}`);
+    console.log(`  Status:      ${campaign.status}  |  Runs: ${runs.length}/${campaign.max_runs}  |  Cost: $${totalCostUsd.toFixed(4)}`);
+    console.log('  ' + '─'.repeat(76));
+    for (const run of runs) {
+        console.log(`\n  \x1b[1m── Run #${run.sequenceOrder}\x1b[0m`);
+        const scoreStr = run.bestScore !== null ? `\x1b[33m⭐ ${run.bestScore.toFixed(1)}/10\x1b[0m` : '  —  ';
+        console.log(`  Best: ${run.bestArm ?? '?'} ${scoreStr}  |  $${run.totalCostUsd.toFixed(4)}  |  ${run.totalArms} arms`);
+        console.log(`  Finding: ${run.finding}`);
+        if (run.runContext) {
+            console.log(`  Context: ${run.runContext.slice(0, 200)}`);
+        }
+        if (run.results.length > 0) {
+            const sorted = [...run.results].sort((a, b) => (b.score ?? 0) - (a.score ?? 0));
+            for (const r of sorted.slice(0, 4)) {
+                const s = r.score !== null ? `\x1b[33m${r.score.toFixed(1)}/10\x1b[0m` : '  —  ';
+                console.log(`    ${r.armId.padEnd(20)} ${s}  $${r.costUsd.toFixed(4)}`);
+            }
+        }
+    }
+    if (campaign.findings) {
+        console.log('\n  ' + '─'.repeat(76));
+        console.log('  \x1b[1m📋 Final Synthesis:\x1b[0m');
+        console.log(`  ${campaign.findings}`);
+    }
+    console.log('\n  ' + '─'.repeat(76));
+    mgr.close();
+}
+/**
+ * modelab campaign synthesize <campaign_id>
+ * Force re-synthesis of all findings.
+ */
+async function cmdCampaignSynthesize(args) {
+    const campaignId = args.find(a => !a.startsWith('--'));
+    if (!campaignId) {
+        console.error('Usage: modelab campaign synthesize <campaign_id>');
+        process.exit(1);
+    }
+    const config = loadConfig();
+    const mgr = new CampaignManager(config);
+    console.log('\n🔄 Synthesizing all campaign findings…\n');
+    try {
+        const synthesis = await mgr.forceSynthesize(campaignId);
+        console.log('\n📋 Synthesis result:');
+        console.log(`   ${synthesis.finding}`);
+        console.log(`   Belief: ${synthesis.belief_change} | Confidence: ${(synthesis.confidence * 100).toFixed(0)}%`);
+        if (synthesis.next_run_recommendation) {
+            console.log(`   Next: ${synthesis.next_run_recommendation}`);
+        }
+        if (synthesis.stop_reason) {
+            console.log(`   Stop reason: ${synthesis.stop_reason}`);
+        }
+    }
+    catch (err) {
+        console.error(`❌ Synthesis failed:`, err);
+    }
+    mgr.close();
+}
+/**
+ * Dispatcher for all campaign subcommands.
+ */
+async function cmdCampaign(args) {
+    const sub = args[0];
+    switch (sub) {
+        case 'new':
+            cmdCampaignNew(args.slice(1));
+            break;
+        case 'run':
+            cmdCampaignRun(args.slice(1));
+            break;
+        case 'status':
+            cmdCampaignStatus(args.slice(1));
+            break;
+        case 'report':
+            cmdCampaignReport(args.slice(1));
+            break;
+        case 'synthesize':
+            cmdCampaignSynthesize(args.slice(1));
+            break;
+        case 'pause': {
+            const config = loadConfig();
+            const mgr = new CampaignManager(config);
+            const id = args[1];
+            if (!id) {
+                console.error('Usage: modelab campaign pause <campaign_id>');
+                process.exit(1);
+            }
+            const updated = mgr.pauseCampaign(id);
+            if (!updated) {
+                console.error(`❌ Campaign not found: ${id}`);
+                process.exit(1);
+            }
+            console.log(`Campaign ${id} paused.`);
+            mgr.close();
+            break;
+        }
+        case 'resume': {
+            const config = loadConfig();
+            const mgr = new CampaignManager(config);
+            const id = args[1];
+            if (!id) {
+                console.error('Usage: modelab campaign resume <campaign_id>');
+                process.exit(1);
+            }
+            const updated = mgr.resumeCampaign(id);
+            if (!updated) {
+                console.error(`❌ Campaign not found: ${id}`);
+                process.exit(1);
+            }
+            console.log(`Campaign ${id} resumed.`);
+            mgr.close();
+            break;
+        }
+        case 'delete': {
+            const config = loadConfig();
+            const mgr = new CampaignManager(config);
+            const id = args[1];
+            if (!id) {
+                console.error('Usage: modelab campaign delete <campaign_id>');
+                process.exit(1);
+            }
+            mgr.deleteCampaign(id);
+            console.log(`Campaign ${id} deleted.`);
+            mgr.close();
+            break;
+        }
+        case 'self': {
+            const config = loadConfig();
+            const mgr = new CampaignManager(config);
+            const existing = mgr.listCampaigns('running').find(c => c.question === SELF_IMPROVEMENT_CAMPAIGN.question);
+            if (existing) {
+                console.log(`Self-improvement campaign already exists: ${existing.id}`);
+                console.log(`Run: modelab campaign run ${existing.id}`);
+                mgr.close();
+                return;
+            }
+            const campaign = mgr.createCampaign({
+                question: SELF_IMPROVEMENT_CAMPAIGN.question,
+                hypothesis: SELF_IMPROVEMENT_CAMPAIGN.hypothesis,
+                maxRuns: SELF_IMPROVEMENT_CAMPAIGN.maxRuns,
+                convergenceThreshold: SELF_IMPROVEMENT_CAMPAIGN.convergenceThreshold,
+            });
+            console.log(`\n🌱 Self-improvement campaign created: ${campaign.id}`);
+            console.log('   Question: What code changes would most improve modelab?');
+            console.log(`   Max runs: ${campaign.max_runs}`);
+            console.log('\nRun: modelab campaign self');
+            console.log(`Or: modelab campaign run ${campaign.id}`);
+            mgr.close();
+            break;
+        }
+        case 'self-run': {
+            const config = loadConfig();
+            const mgr = new CampaignManager(config);
+            let campaign = mgr.listCampaigns('running').find(c => c.question === SELF_IMPROVEMENT_CAMPAIGN.question);
+            if (!campaign) {
+                campaign = mgr.createCampaign({
+                    question: SELF_IMPROVEMENT_CAMPAIGN.question,
+                    hypothesis: SELF_IMPROVEMENT_CAMPAIGN.hypothesis,
+                    maxRuns: SELF_IMPROVEMENT_CAMPAIGN.maxRuns,
+                    convergenceThreshold: SELF_IMPROVEMENT_CAMPAIGN.convergenceThreshold,
+                });
+            }
+            const arms = SELF_IMPROVEMENT_CAMPAIGN.buildArms();
+            console.log(`\n🌱 Self-improvement campaign: ${campaign.id} (run #${campaign.total_runs + 1}/${campaign.max_runs})`);
+            try {
+                const { campaign: updated, runLog, synthesis } = await mgr.runNext(campaign.id, arms);
+                console.log(`\n🏁 Run complete — ${updated.status}`);
+                console.log(`   Synthesis: ${synthesis.finding}`);
+                console.log(`   Belief: ${synthesis.belief_change} | Confidence: ${(synthesis.confidence * 100).toFixed(0)}%`);
+                if (synthesis.next_run_recommendation)
+                    console.log(`   Next: ${synthesis.next_run_recommendation}`);
+                if (updated.status === 'running') {
+                    console.log('\n   → Run again: modelab campaign self');
+                }
+            }
+            catch (err) {
+                console.error('Self-improvement run failed:', err);
+            }
+            mgr.close();
+            break;
+        }
+        case 'help':
+        case '--help':
+            console.log(`
+🎯 Campaign Commands
+
+  modelab campaign new "<question>" [--hypothesis "<text>"] [--runs N]
+    Create a new research campaign (default: 5 max runs)
+
+  modelab campaign run <campaign_id>
+    Run the next experiment in a campaign
+
+  modelab campaign status [campaign_id]
+    Show campaign status (or list all if no id given)
+
+  modelab campaign report <campaign_id>
+    Full campaign report with all runs and synthesis
+
+  modelab campaign synthesize <campaign_id>
+    Force re-synthesis of all findings
+
+  modelab campaign pause <campaign_id>
+    Pause a running campaign
+
+  modelab campaign resume <campaign_id>
+    Resume a paused campaign
+
+  modelab campaign delete <campaign_id>
+    Delete a campaign and its runs
+
+  modelab campaign self
+    Create the self-improvement campaign
+
+  modelab campaign self-run
+    Run the next self-improvement experiment (creates campaign if needed)
+`);
+            break;
+        default:
+            if (!sub || sub === 'campaigns') {
+                await cmdCampaignStatus(args);
+            }
+            else {
+                console.error(`❌ Unknown campaign command: ${sub}`);
+                console.error('Run: modelab campaign help');
+                process.exit(1);
+            }
+    }
+}
 /**
  * modelab review <run-id>
  * Full terminal report for a single run — latency breakdown, per-iteration lessons,

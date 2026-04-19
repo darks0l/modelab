@@ -95,5 +95,7 @@ export class Cache {
     size() {
         return this.entries.size;
     }
+    /** No-op — kept for API compatibility with EmbeddingStore.close() pattern */
+    close() { }
 }
 //# sourceMappingURL=cache.js.map
