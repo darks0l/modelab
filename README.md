@@ -36,7 +36,25 @@ modelab run --goal "Compare Postgres vs DynamoDB for a startup" --format html --
 
 ---
 
-## What's new in v0.3
+## What's new in v0.4
+
+### Actionable Self-Iteration (lesson_engine)
+Previous versions stored "lessons" as advisory notes nobody read. v0.4 closes the loop: after each run, the lesson_engine parses the scorer output, writes actual router adjustments to the DB, and the routing layer applies them before the next run. Score below 4? Model gets a -1 penalty. Score above 8? It gets boosted for that task type. Lessons become config changes — automatically.
+
+### Model Profiles
+Every model maintains a performance profile updated after each run: avg_score, avg_latency_ms, avg_cost_usd, strengths[], weaknesses[]. The router reads this, not just keyword matching.
+
+### Semantic Memory (embedding_store)
+Run summaries and lessons are embedded using TF-IDF vectors (Ollama nomic-embed-text when available) and stored in SQLite. Query past experiments semantically: `modelab recall "what did we learn about coding tasks?"`
+
+### Learned Routing (routing_v2)
+Replaces the keyword router with a performance-based router that considers: model strengths for the task type, historical scores, active adjustments, and similar past runs.
+
+### Campaign Layer
+Multi-run research campaigns: `modelab campaign new "My Hypothesis" --runs 10 --synthesize`. Coordinates a series of runs, synthesizes findings, and generates reports.
+
+### Task Complexity Profiling
+Goals are analyzed for complexity (question marks, structure, length) before routing. High-complexity tasks get more iterations; low-complexity get faster models.
 
 ### LCM Memory v2 — Cross-Run Persistence + Cross-Iteration Learning
 Every run writes iteration summaries and full run summaries to SQLite. Before running, modelab loads prior context for the same goal ID — so lessons from last week actually influence today's experiment. The `iteration_context` template variable carries these lessons into new prompts automatically.

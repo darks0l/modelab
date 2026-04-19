@@ -2,6 +2,22 @@
 
 All notable changes to this project are documented in this file.
 
+## v0.4.1
+
+- fix: TF-IDF blob round-trip — TfIdfVector.fromBlob() for proper deserialization (was returning null on read-back)
+- fix: task type inference — REASON_KEYWORDS now catches 'explain why' and general reasoning terms; GLM model mentions still trigger reasoning
+
+## v0.4.0
+
+- feat: lesson_engine — actionable self-iteration closes the loop: run → score → apply router adjustment → next run uses adjusted behavior
+- feat: model_profiles table — per-model avg_score, avg_latency_ms, avg_cost_usd, strengths[], weaknesses[]; updated after each run
+- feat: router_adjustments table — score_delta, weight_boost, temp_override adjustments written by scorer; applied before each routing decision
+- feat: applied_lessons table — records every lesson that was parsed into an actual system change; tracks effectiveness score
+- feat: embedding_store — semantic memory with TF-IDF fallback vectors stored in SQLite; supports run and lesson embeddings
+- feat: routing_v2 — learned routing that uses model_profiles + task type + active adjustments instead of keyword matching
+- feat: campaign layer — multi-run research campaigns with synthesize/report; campaign orchestrator coordinates multi-run studies
+- feat: complexity.ts — task complexity profiler (length, question marks, structure heuristics → 1-10 score)
+
 ## v0.3.11
 
 - feat: GLM-5.0 router keywords (`glm`, `glm-5`, `glm5`, `智谱`, `zhipu`)
