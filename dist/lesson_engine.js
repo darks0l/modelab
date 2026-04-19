@@ -55,12 +55,13 @@ export function resetLessonEngine() {
 }
 // ── Keyword extractors ───────────────────────────────────────────────────────
 const CODE_KEYWORDS = /\b(code|function|refactor|bug|fix|test|build|repo|pull.?request|pr|typescript|javascript|python|rust|compile|lint|eslint|prettier|npm|yarn|cargo)\b/i;
-const REASON_KEYWORDS = /\b(reason|proof|logic|analysis|analyze|theorem|prove|conjecture|derive|evaluate|compare|contrast|critique|synthesis|reasoning(?:\.step)?|step\.by\.step|glm-(?:5|4\.7|5\.1|5\.0)|glm(?:5|4\.7|5\.1|5\.0|4))\b/i;
+const REASON_KEYWORDS = /\b(reason|proof|logic|analysis|analyze|theorem|prove|conjecture|derive|evaluate|compare|contrast|critique|synthesis|reasoning(?:\.step)?|step\.by\.step|explain why)\b/i;
+const GLM_MODEL_KEYWORDS = /\b(glm-(?:5|4\.7|5\.1|5\.0)|glm(?:5|4\.7|5\.1|5\.0|4))\b/i;
 const QUICK_KEYWORDS = /\b(quick|small|summary|brief|one.?liner|quick.?summary|what is|define|lookup)\b/i;
 function inferTaskType(question) {
     if (CODE_KEYWORDS.test(question))
         return 'coding';
-    if (REASON_KEYWORDS.test(question))
+    if (REASON_KEYWORDS.test(question) || GLM_MODEL_KEYWORDS.test(question))
         return 'reasoning';
     if (QUICK_KEYWORDS.test(question))
         return 'quick';

@@ -946,6 +946,63 @@ function cmdCache(args: string[]) {
   console.log(`   TTL: 7 days\n`);
 }
 
+/**
+ * modelab recall <query>
+ * Semantic search over past runs and lessons using the embedding store.
+ */
+async function cmdRecall(args: string[]) {
+  const query = extractArg(args, '--query') ?? args.filter(a => !a.startsWith('--'))[0];
+  if (!query) {
+    console.error('❌ Usage: modelab recall <query>  or  modelab recall --query <text>');
+    console.error('   Example: modelab recall "what models performed best on code tasks?"');
+    process.exit(1);
+  }
+
+  const limit = parseInt(extractArg(args, '--limit') ?? '10', 10);
+  const store = getEmbeddingStore();
+
+  console.log(`\n🔍 Searching for: "${query}"\n`);
+
+  try {
+    const results = await store.search(query, limit);
+
+    if (results.length === 0) {
+      console.log('No matching runs or lessons found. Try different keywords.');
+      store.close();
+      return;
+    }
+
+    const runResults = results.filter(r => r.source === 'run');
+    const lessonResults = results.filter(r => r.source === 'lesson');
+
+    if (runResults.length > 0) {
+      console.log(`📜 Matching runs (${runResults.length}):\n`);
+      for (const r of runResults.slice(0, 5)) {
+        const goal = (r.goalText ?? r.runId ?? '').slice(0, 60);
+        const score = (r.score * 100).toFixed(0);
+        console.log(`  [${score}% match] ${goal}${goal.length >= 60 ? '…' : ''}`);
+        console.log(`    Run: ${r.runId} | Summary: ${(r.summaryText ?? '').slice(0, 80)}…\n`);
+      }
+    }
+
+    if (lessonResults.length > 0) {
+      console.log(`📚 Matching lessons (${lessonResults.length}):\n`);
+      for (const r of lessonResults.slice(0, 5)) {
+        const score = (r.score * 100).toFixed(0);
+        const text = r.lessonText?.slice(0, 100) ?? '';
+        console.log(`  [${score}% match] ${text}…\n`);
+      }
+    }
+
+    console.log(`\n  ${results.length} total matches (query: "${query}", limit: ${limit})`);
+    console.log(`  Use --limit N to show more results\n`);
+  } catch (err) {
+    console.error(`❌ Recall search failed:`, err instanceof Error ? err.message : String(err));
+  }
+
+  store.close();
+}
+
 // ── Entry point ────────────────────────────────────────────────────────────
 
 const subcommand = process.argv[2];
@@ -962,6 +1019,7 @@ switch (subcommand) {
   case 'profile':     cmdProfile(subArgs);       break;
   case 'cache':       cmdCache(subArgs);       break;
   case 'lessons':     cmdLessons(subArgs);     break;
+  case 'recall':      cmdRecall(subArgs);      break;
   case 'stats':       cmdStats(subArgs);        break;
   case 'report':      cmdReport(subArgs);       break;
   case 'interactive': cmdInteractive();         break;

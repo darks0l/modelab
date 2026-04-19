@@ -3,6 +3,9 @@ import { callModelFull, estimateTokens } from './evaluator.js';
 import { scoreOutput } from './scorer.js';
 import { ExperimentMemory } from './memory.js';
 import { Cache } from './cache.js';
+import { getLessonEngine } from './lesson_engine.js';
+import { estimateComplexity } from './complexity.js';
+import { getEmbeddingStore } from './embedding_store.js';
 const SPINNERS = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 let spinnerIdx = 0;
 function spin(label) {
@@ -58,6 +61,7 @@ export class ResearchOrchestrator {
             return [arm];
         });
         try {
+            let lastIterSummary;
             for (let iter = 1; iter <= goal.maxIterations; iter++) {
                 // Cross-iteration learning: pull context ONCE per iteration (not per-arm)
                 const iterContext = this.memory.getContextForIteration(goal.id, runId, iter);
@@ -129,8 +133,8 @@ export class ResearchOrchestrator {
                 // Cross-iteration learning: summarize what happened this iteration
                 const iterResults = allResults.filter(r => r.iteration === iter);
                 if (iterResults.length > 0) {
-                    const summary = this.memory.summarize(runId, goal.id, iter, iterResults);
-                    this.progress(`  📝 Lesson: ${summary.lesson}`);
+                    lastIterSummary = this.memory.summarize(runId, goal.id, iter, iterResults);
+                    this.progress(`  📝 Lesson: ${lastIterSummary.lesson}`);
                 }
                 if (bestResult && bestResult.score !== null && bestResult.score >= goal.qualityThreshold) {
                     this.progress(`\n✅ Quality threshold reached: ${bestResult.score} ≥ ${goal.qualityThreshold}`);
@@ -155,6 +159,41 @@ export class ResearchOrchestrator {
         // Store run-level summary so the full experiment story is preserved
         const startedAtIso = new Date(startTime).toISOString();
         this.memory.summarizeRun(runId, goal.id, status, startedAtIso, completedAt, allResults);
+        // ── Self-iteration: apply lessons + index embeddings ────────────────────────
+        // These are fire-and-forget — never block the run result
+        try {
+            const lessonEngine = getLessonEngine();
+            const embeddingStore = getEmbeddingStore();
+            const taskType = estimateComplexity(goal.question);
+            // Index this run's result in the semantic memory store
+            const runSummary = allResults.length > 0
+                ? `Run ${runId.slice(0, 8)} | ${allResults.length} arms | best: ${bestResult?.score ?? 'N/A'}/10 | question: ${goal.question}`
+                : goal.question;
+            embeddingStore.storeRunEmbedding(runId, goal.question, runSummary);
+            // Update model profiles with this run's outcomes
+            if (allResults.length > 0) {
+                const profileResults = allResults.map(r => ({
+                    model: r.model,
+                    score: r.score,
+                    costUsd: r.costUsd,
+                    latencyMs: r.latencyMs,
+                    armId: r.armId,
+                }));
+                lessonEngine.updateProfiles(profileResults, goal.question);
+                // Also apply auto-lessons from the iteration summary (processRunLesson)
+                // Reuse lastIterSummary from the loop — don't call summarize again
+                if (lastIterSummary?.lesson) {
+                    lessonEngine.processRunLesson(lastIterSummary.lesson, {
+                        taskType,
+                        score: bestResult?.score ?? undefined,
+                    });
+                }
+            }
+        }
+        catch (err) {
+            // Non-critical — log but don't fail the run result
+            console.warn('[orchestrator] self-iteration hook failed:', err instanceof Error ? err.message : String(err));
+        }
         return {
             goalId: goal.id,
             runId,

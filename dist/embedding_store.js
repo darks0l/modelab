@@ -100,6 +100,13 @@ class TfIdfVector {
             obj[k] = v;
         return Buffer.from(JSON.stringify(obj), 'utf8');
     }
+    /** Reconstruct a TfIdfVector from a stored blob (after JSON parse). */
+    static fromBlob(obj) {
+        const vec = new Map();
+        for (const [k, v] of Object.entries(obj))
+            vec.set(parseInt(k), v);
+        return Object.setPrototypeOf({ vector: vec, dimension: 2048 }, TfIdfVector.prototype);
+    }
     cosineSimilarity(other) {
         if (!(other instanceof TfIdfVector))
             return 0;
@@ -347,12 +354,7 @@ export class EmbeddingStore {
             }
             else {
                 const obj = JSON.parse(blob.toString('utf8'));
-                const vec = new Map();
-                for (const [k, v] of Object.entries(obj))
-                    vec.set(parseInt(k), v);
-                // Reconstruct TfIdfVector from its internal map
-                const tfidf = Object.setPrototypeOf({ vector: vec, dimension: 2048 }, TfIdfVector.prototype);
-                return tfidf;
+                return TfIdfVector.fromBlob(obj);
             }
         }
         catch {
