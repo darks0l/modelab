@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { Cache } from '../src/cache.js';
 import type { ExperimentResult } from '../src/types.js';
+import { estimateTokens, estimateTokensAsync } from '../src/evaluator.js';
 import { writeFileSync, mkdirSync, unlinkSync, readFileSync } from 'fs';
 import { join, dirname } from 'path';
 import { homedir } from 'os';
@@ -308,8 +309,6 @@ describe('Cache', () => {
 });
 
 // ── Token estimation (from evaluator) ────────────────────────────────────────
-
-import { estimateTokens, estimateTokensAsync } from '../src/evaluator.js';
 
 describe('evaluator token estimation', () => {
   it('returns a positive token count for non-empty string', () => {

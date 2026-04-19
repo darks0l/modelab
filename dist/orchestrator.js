@@ -22,6 +22,7 @@ export class ResearchOrchestrator {
     onStream;
     onArmComplete;
     onProgress;
+    latencyTargetMs;
     constructor(config) {
         this.models = config.models;
         this.budget = config.budget;
@@ -32,6 +33,7 @@ export class ResearchOrchestrator {
         this.onStream = config.onStream;
         this.onArmComplete = config.onArmComplete;
         this.onProgress = config.onProgress;
+        this.latencyTargetMs = config.latencyTargetMs;
     }
     async run(goal) {
         const runId = uuid();
@@ -71,10 +73,20 @@ export class ResearchOrchestrator {
                 // Batch arms by parallelism
                 const batches = batchArray(expandedArms, this.parallelism);
                 for (const batch of batches) {
+                    // Filter arms that are too slow based on historical TTFT
+                    const slowArms = batch.filter(arm => this.isArmTooSlow(arm.id));
+                    const fastEnough = batch.filter(arm => !this.isArmTooSlow(arm.id));
+                    for (const arm of slowArms) {
+                        this.progress(`  ⏭  ${arm.name}: skipped — historical TTFT exceeds ${this.latencyTargetMs}ms limit`);
+                    }
+                    if (fastEnough.length === 0) {
+                        this.progress(`  All arms in batch skipped (too slow) — moving to next batch`);
+                        continue;
+                    }
                     // Pre-check: estimate total cost for this batch before spending anything.
                     // Use actual token counts from prior iterations if available for this arm,
                     // otherwise fall back to a conservative estimate based on question length.
-                    const batchCostEstimate = batch.reduce((sum, arm) => {
+                    const batchCostEstimate = fastEnough.reduce((sum, arm) => {
                         const cfg = this.models[arm.model];
                         if (!cfg)
                             return sum;
@@ -98,7 +110,7 @@ export class ResearchOrchestrator {
                         status = 'budget_exceeded';
                         break;
                     }
-                    const armResults = await Promise.allSettled(batch.map(arm => this.runArm(arm, goal, iter, runId, iterContext)));
+                    const armResults = await Promise.allSettled(fastEnough.map(arm => this.runArm(arm, goal, iter, runId, iterContext)));
                     for (const result of armResults) {
                         if (result.status === 'rejected') {
                             console.error(`  ❌ ${result.reason}`);
@@ -244,6 +256,8 @@ export class ResearchOrchestrator {
             armId: arm.id,
             model: arm.model,
             output,
+            outputPreview: output.slice(0, 200),
+            outputTruncated: output.length > 200,
             score,
             scoreError,
             costUsd: Math.round(costUsd * 1e6) / 1e6,
@@ -306,6 +320,21 @@ export class ResearchOrchestrator {
         else {
             console.log(msg);
         }
+    }
+    /**
+     * Returns true if an arm should be skipped this iteration because its
+     * historical average TTFT exceeds the configured latencyTargetMs.
+     * Arms with no latency history are allowed to run (we don't know yet).
+     */
+    isArmTooSlow(armId) {
+        if (this.latencyTargetMs === undefined || this.latencyTargetMs <= 0)
+            return false;
+        const history = this.memory.getHistory();
+        const armResults = history.filter(r => r.armId === armId && r.latencyMs > 0);
+        if (armResults.length === 0)
+            return false; // no data yet — let it run
+        const avg = armResults.reduce((s, r) => s + r.latencyMs, 0) / armResults.length;
+        return avg > this.latencyTargetMs;
     }
 }
 function batchArray(arr, size) {

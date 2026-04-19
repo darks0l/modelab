@@ -66,9 +66,9 @@ export function routeTask(
 
   const preferenceMap: Record<TaskComplexity, string[]> = {
     coding:    ['coding', 'balanced', 'fast', 'reasoning', 'glm-reasoning'],
-    reasoning: ['glm-reasoning', 'reasoning', 'balanced', 'fast'],
+    reasoning: ['reasoning', 'glm-reasoning', 'glm5', 'glm51', 'glm', 'balanced', 'fast'],
     quick:     ['fast', 'glm-fast', 'balanced'],
-    balanced:  ['balanced', 'glm', 'fast', 'reasoning', 'coding', 'glm-reasoning'],
+    balanced:  ['balanced', 'glm', 'glm5', 'glm51', 'fast', 'reasoning', 'coding', 'glm-reasoning'],
   };
 
   const preferred = preferenceMap[complexity];

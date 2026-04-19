@@ -33,6 +33,21 @@ export interface RunLatencyStats {
     /** Which arm had the best latency */
     bestArmId: string | null;
 }
+export interface ModelInsight {
+    armFamily: string;
+    provider: string;
+    model: string;
+    taskType: string;
+    temperature: number | null;
+    sampleSize: number;
+    avgScore: number | null;
+    avgLatencyMs: number | null;
+    avgCostUsd: number | null;
+    bestScore: number | null;
+    winRate: number;
+    lastUsed: string | null;
+    verdict: string;
+}
 export interface RunSummary {
     runId: string;
     goalId: string;
@@ -95,6 +110,37 @@ export declare class ExperimentMemory {
     getRunSummaries(goalId?: string): RunSummary[];
     getRun(runId: string): RunSummary | null;
     private _latencyStatsForRun;
+    /**
+     * Returns per-(arm family, task type, temperature) insights from all stored
+     * experiment results. Task type is inferred from the goal question keywords.
+     */
+    getModelInsights(): ModelInsight[];
+    /**
+     * Returns aggregate statistics across all runs or a specific goal.
+     */
+    getAggregateStats(goalId?: string): AggregateStats;
+    private _extractQuestionFromReport;
     close(): void;
+}
+export declare function calcLatencyStats(results: ExperimentResult[]): RunLatencyStats;
+export interface AggregateStats {
+    totalRuns: number;
+    totalArmRuns: number;
+    totalIterations: number;
+    totalCostUsd: number;
+    avgCostPerRun: number;
+    avgScore: number | null;
+    bestScore: number | null;
+    bestArmId: string | null;
+    bestRunId: string | null;
+    avgLatencyMs: number | null;
+    p50LatencyMs: number | null;
+    p95LatencyMs: number | null;
+    bestLatencyMs: number | null;
+    bestLatencyArmId: string | null;
+    runsByStatus: Record<string, number>;
+    armsByModel: Record<string, number>;
+    goalsStudied: number;
+    avgIterationsPerRun: number | null;
 }
 //# sourceMappingURL=memory.d.ts.map

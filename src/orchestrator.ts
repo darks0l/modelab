@@ -14,6 +14,11 @@ export interface OrchestratorConfig extends Omit<ModelabConfig, 'cache' | 'expor
   onArmComplete?: (result: ExperimentResult) => void;
   /** Called for progress updates */
   onProgress?: (msg: string) => void;
+  /** Maximum acceptable TTFT (time-to-first-token) in ms.
+   * Arms whose historical average TTFT exceeds this threshold are skipped
+   * (unless they have no latency history yet).
+   * Undefined/null means no filtering — all arms run regardless of speed. */
+  latencyTargetMs?: number;
 }
 
 const SPINNERS = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
@@ -38,6 +43,7 @@ export class ResearchOrchestrator {
   private readonly onStream?: (armId: string, chunk: string) => void;
   private readonly onArmComplete?: (result: ExperimentResult) => void;
   private readonly onProgress?: (msg: string) => void;
+  private readonly latencyTargetMs?: number;
 
   constructor(config: OrchestratorConfig) {
     this.models = config.models;
@@ -49,6 +55,7 @@ export class ResearchOrchestrator {
     this.onStream = config.onStream;
     this.onArmComplete = config.onArmComplete;
     this.onProgress = config.onProgress;
+    this.latencyTargetMs = config.latencyTargetMs;
   }
 
   async run(goal: ResearchGoal): Promise<RunLog> {
@@ -95,10 +102,21 @@ export class ResearchOrchestrator {
         // Batch arms by parallelism
         const batches = batchArray(expandedArms, this.parallelism);
         for (const batch of batches) {
+          // Filter arms that are too slow based on historical TTFT
+          const slowArms = batch.filter(arm => this.isArmTooSlow(arm.id));
+          const fastEnough = batch.filter(arm => !this.isArmTooSlow(arm.id));
+          for (const arm of slowArms) {
+            this.progress(`  ⏭  ${arm.name}: skipped — historical TTFT exceeds ${this.latencyTargetMs}ms limit`);
+          }
+          if (fastEnough.length === 0) {
+            this.progress(`  All arms in batch skipped (too slow) — moving to next batch`);
+            continue;
+          }
+
           // Pre-check: estimate total cost for this batch before spending anything.
           // Use actual token counts from prior iterations if available for this arm,
           // otherwise fall back to a conservative estimate based on question length.
-          const batchCostEstimate = batch.reduce((sum, arm) => {
+          const batchCostEstimate = fastEnough.reduce((sum, arm) => {
             const cfg = this.models[arm.model];
             if (!cfg) return sum;
             // Use prior iteration token data if available for this arm
@@ -124,7 +142,7 @@ export class ResearchOrchestrator {
           }
 
           const armResults = await Promise.allSettled(
-            batch.map(arm => this.runArm(arm, goal, iter, runId, iterContext))
+            fastEnough.map(arm => this.runArm(arm, goal, iter, runId, iterContext))
           );
 
           for (const result of armResults) {
@@ -372,6 +390,20 @@ export class ResearchOrchestrator {
     } else {
       console.log(msg);
     }
+  }
+
+  /**
+   * Returns true if an arm should be skipped this iteration because its
+   * historical average TTFT exceeds the configured latencyTargetMs.
+   * Arms with no latency history are allowed to run (we don't know yet).
+   */
+  private isArmTooSlow(armId: string): boolean {
+    if (this.latencyTargetMs === undefined || this.latencyTargetMs <= 0) return false;
+    const history = this.memory.getHistory();
+    const armResults = history.filter(r => r.armId === armId && r.latencyMs > 0);
+    if (armResults.length === 0) return false; // no data yet — let it run
+    const avg = armResults.reduce((s, r) => s + r.latencyMs, 0) / armResults.length;
+    return avg > this.latencyTargetMs;
   }
 }
 

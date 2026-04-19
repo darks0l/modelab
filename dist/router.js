@@ -1,5 +1,5 @@
 const CODE_KEYWORDS = /\b(code|function|refactor|bug|fix|test|build|repo|pull.request|pr\b|typescript|javascript|python|rust|compile|lint|eslint|prettier|npm|yarn|cargo)\b/i;
-const REASON_KEYWORDS = /\b(reason|proof|logic|analysis|analyze|theorem|prove|conjecture|derive|evaluate|compare|contrast|critique|synthesis)\b/i;
+const REASON_KEYWORDS = /\b(reason|proof|logic|analysis|analyze|theorem|prove|conjecture|derive|evaluate|compare|contrast|critique|synthesis|reasoning.step|step.by.step|glm-5|glm5|glm-4.7|glm4.7|glm-5.1|glm5.1|glm-5.0|glm5.0|glm4\b)\b/i;
 const QUICK_KEYWORDS = /\b(quick|small|summary|brief|one.liner|quick.summary|what.is|define|lookup)\b/i;
 export function estimateComplexity(task) {
     if (CODE_KEYWORDS.test(task))
@@ -46,10 +46,10 @@ export function routeTask(task, modelConfigs, mode = 'quality') {
     const complexity = estimateComplexity(task);
     const keys = Object.keys(modelConfigs);
     const preferenceMap = {
-        coding: ['coding', 'balanced', 'fast', 'reasoning'],
-        reasoning: ['reasoning', 'balanced', 'fast'],
-        quick: ['fast', 'balanced'],
-        balanced: ['balanced', 'fast', 'reasoning', 'coding'],
+        coding: ['coding', 'balanced', 'fast', 'reasoning', 'glm-reasoning'],
+        reasoning: ['reasoning', 'glm-reasoning', 'glm5', 'glm51', 'glm', 'balanced', 'fast'],
+        quick: ['fast', 'glm-fast', 'balanced'],
+        balanced: ['balanced', 'glm', 'glm5', 'glm51', 'fast', 'reasoning', 'coding', 'glm-reasoning'],
     };
     const preferred = preferenceMap[complexity];
     for (const key of preferred) {

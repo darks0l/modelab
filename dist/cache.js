@@ -35,9 +35,12 @@ export class Cache {
      * @param modelKey - the model config key, e.g. "fast", "balanced"
      */
     set(key, result, question, modelKey) {
+        const outputPreview = result.output.slice(0, 200);
         const entry = {
             hash: key,
             output: result.output,
+            outputPreview,
+            outputTruncated: result.output.length > 200,
             score: result.score,
             costUsd: result.costUsd,
             tokensUsed: result.tokensUsed,

@@ -3,6 +3,10 @@ export interface CacheEntry {
     /** Full SHA-256 hash of question:model:armId */
     hash: string;
     output: string;
+    /** First 200 chars of output — for quick preview in tables/history */
+    outputPreview: string;
+    /** True if output was truncated (>200 chars stored) */
+    outputTruncated: boolean;
     score: number | null;
     costUsd: number;
     tokensUsed: {

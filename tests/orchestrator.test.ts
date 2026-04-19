@@ -456,4 +456,136 @@ describe('Orchestrator', () => {
     expect(maxConcurrent).toBeGreaterThanOrEqual(3);
     expect(callModelFullSpy).toHaveBeenCalledTimes(3);
   });
+
+  it('expands temperatureSweep arms into per-temperature sub-arms', async () => {
+    const { ResearchOrchestrator } = await import('../src/orchestrator.js');
+    const orch = new ResearchOrchestrator({
+      models: MODELS,
+      budget: { maxPerRun: 10, maxPerExperiment: 10, trackCosts: true },
+      evalModel: 'balanced',
+      parallelism: 3,
+      memory: fakeMemory,
+      cache: fakeCache,
+    });
+
+    // One arm with 3-temperature sweep → expands to 3 sub-arms
+    const goal = makeGoal({
+      maxIterations: 1,
+      qualityThreshold: 10, // never reached — all iters run
+      arms: [
+        {
+          id: 'arm-balanced',
+          name: 'Balanced Sweep',
+          promptTemplate: 'Answer: {{question}}',
+          model: 'balanced',
+          temperatureSweep: [0.0, 0.5, 1.0],
+        },
+      ],
+    });
+
+    await orch.run(goal);
+
+    // 3 sub-arms × 1 iteration = 3 total model calls
+    expect(callModelFullSpy).toHaveBeenCalledTimes(3);
+
+    // Verify each expanded arm has a distinct id embedding its temperature
+    const allResults = fakeMemory.log.mock.calls.map(call => call[0] as ExperimentResult);
+    expect(allResults).toHaveLength(3);
+    const armIds = allResults.map(r => r.armId);
+    // arm id format: arm-balanced_t0_0 / arm-balanced_t0_5 / arm-balanced_t1_0
+    expect(armIds[0]).toContain('arm-balanced');
+    expect(new Set(armIds).size).toBe(3); // all distinct
+  });
+
+  it('skips arms whose historical TTFT exceeds latencyTargetMs', async () => {
+    // Pre-populate memory with slow historical results for arm-slow
+    const slowHistory: ExperimentResult[] = [
+      {
+        armId: 'arm-slow',
+        model: 'balanced',
+        output: 'slow output',
+        outputPreview: '',
+        outputTruncated: false,
+        score: 7,
+        costUsd: 0.001,
+        tokensUsed: { input: 100, output: 50 },
+        durationMs: 5000,
+        latencyMs: 4000, // very slow TTFT
+        timestamp: new Date().toISOString(),
+        iteration: 1,
+        runId: 'prior-run',
+        goalId: 'goal-latency-test',
+      },
+    ];
+
+    const memWithHistory = {
+      ...fakeMemory,
+      getHistory: vi.fn().mockReturnValue(slowHistory),
+    };
+
+    const { ResearchOrchestrator } = await import('../src/orchestrator.js');
+    const orch = new ResearchOrchestrator({
+      models: MODELS,
+      budget: { maxPerRun: 10, maxPerExperiment: 10, trackCosts: true },
+      evalModel: 'balanced',
+      parallelism: 2,
+      memory: memWithHistory as unknown as import('../src/memory.js').ExperimentMemory,
+      cache: fakeCache,
+      latencyTargetMs: 2000, // skip arms with avg TTFT > 2000ms
+    });
+
+    const goal = makeGoal({
+      maxIterations: 1,
+      qualityThreshold: 10,
+      arms: [
+        { id: 'arm-slow',  name: 'Slow Arm',  promptTemplate: 'Answer: {{question}}', model: 'balanced' },
+        { id: 'arm-fast',  name: 'Fast Arm',  promptTemplate: 'Answer: {{question}}', model: 'balanced' },
+      ],
+    });
+
+    await orch.run(goal);
+
+    // arm-slow has avg TTFT=4000ms > 2000ms → skipped
+    // arm-fast has no history → runs
+    // Only 1 model call (arm-fast)
+    expect(callModelFullSpy).toHaveBeenCalledTimes(1);
+
+    // Verify the logged result is only arm-fast
+    const logged = fakeMemory.log.mock.calls.map(call => call[0] as ExperimentResult);
+    expect(logged).toHaveLength(1);
+    expect(logged[0].armId).toBe('arm-fast');
+  });
+
+  it('allows arms with no latency history to run even when latencyTargetMs is set', async () => {
+    // Empty history — all arms should run regardless of latencyTargetMs
+    const emptyHistoryMem = {
+      ...fakeMemory,
+      getHistory: vi.fn().mockReturnValue([]),
+    };
+
+    const { ResearchOrchestrator } = await import('../src/orchestrator.js');
+    const orch = new ResearchOrchestrator({
+      models: MODELS,
+      budget: { maxPerRun: 10, maxPerExperiment: 10, trackCosts: true },
+      evalModel: 'balanced',
+      parallelism: 2,
+      memory: emptyHistoryMem as unknown as import('../src/memory.js').ExperimentMemory,
+      cache: fakeCache,
+      latencyTargetMs: 1, // very aggressive threshold
+    });
+
+    const goal = makeGoal({
+      maxIterations: 1,
+      qualityThreshold: 10,
+      arms: [
+        { id: 'arm-a', name: 'Arm A', promptTemplate: 'A: {{question}}', model: 'balanced' },
+        { id: 'arm-b', name: 'Arm B', promptTemplate: 'B: {{question}}', model: 'balanced' },
+      ],
+    });
+
+    await orch.run(goal);
+
+    // No history → no skip → both arms run
+    expect(callModelFullSpy).toHaveBeenCalledTimes(2);
+  });
 });
