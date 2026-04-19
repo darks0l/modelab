@@ -86,8 +86,8 @@ export class ResearchOrchestrator {
       return [arm];
     });
 
+    let lastIterSummary: ReturnType<typeof this.memory.summarize> | undefined;
     try {
-      let lastIterSummary: ReturnType<typeof this.memory.summarize> | undefined;
       for (let iter = 1; iter <= goal.maxIterations; iter++) {
         // Cross-iteration learning: pull context ONCE per iteration (not per-arm)
         const iterContext = this.memory.getContextForIteration(goal.id, runId, iter);
