@@ -1,4 +1,12 @@
+![DARKSOL](./assets/darksol-banner.png)
+Built by DARKSOL 🌑
+
 # modelab 🌑 — Autonomous AI Research OS
+
+[![npm version](https://img.shields.io/npm/v/modelab)](https://www.npmjs.com/package/modelab)
+[![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
+[![platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-blue)](./)
+[![node >=18](https://img.shields.io/badge/node-%3E%3D18-339933.svg)](https://nodejs.org)
 
 > **This is a real research engine, not a demo or toy.** It runs structured experiments against multiple models simultaneously, scores outputs against a rubric, caches results, learns across runs, and produces reports you can actually act on.
 
@@ -91,6 +99,7 @@ modelab run --goal "..." [--iterations N] [--threshold N] [--arms m1,m2]
 
 modelab experiments [--sort score|cost|date]    View all runs at a glance
 modelab review <run-id>                         Deep-dive: latency + lesson breakdown
+modelab recall "what did we learn about..."    Semantic search across runs + lessons
 modelab history                                 Show run history
 modelab best [--goal-id]                        Show best result for a goal
 modelab templates                               List built-in prompt templates
@@ -124,7 +133,7 @@ Tasks are classified by keyword heuristics and routed to the best-fit model:
 | Task | Keywords | Routes to |
 |------|----------|-----------|
 | coding | code, refactor, bug, build, PR, function, class | `coding` |
-| reasoning | proof, logic, analysis, theorem, theorem,证明,推理 | `reasoning` |
+| reasoning | proof, logic, analysis, theorem, 证明,推理 | `reasoning` |
 | glm | glm, glm-5, glm5, 智谱, zhipu | `glm` |
 | quick | quick, summary, what is, define, 什么是 | `fast` |
 | default | everything else | `balanced` |
@@ -144,8 +153,8 @@ Override with `--arms fast,balanced,reasoning` or configure explicitly in config
     "balanced":  { "provider": "anthropic", "model": "claude-sonnet-4-6",        "costPerMillionInput": 3,     "costPerMillionOutput": 15 },
     "reasoning": { "provider": "openai",   "model": "o1",                       "costPerMillionInput": 15,    "costPerMillionOutput": 60 },
     "coding":    { "provider": "ollama",   "model": "qwen3-coder",              "baseUrl": "http://localhost:11434" },
-    "glm":       { "provider": "openai",    "model": "glm-z1-air",                "baseUrl": "https://open.bigmodel.cn/api/paas/v4" },
-    "groq":      { "provider": "groq",      "model": "llama-3.3-70b-versatile",  "costPerMillionInput": 0.2,   "costPerMillionOutput": 0.8 }
+    "glm":       { "provider": "openai",   "model": "glm-z1-air",               "baseUrl": "https://open.bigmodel.cn/api/paas/v4" },
+    "groq":      { "provider": "groq",     "model": "llama-3.3-70b-versatile",  "costPerMillionInput": 0.2,   "costPerMillionOutput": 0.8 }
   },
   "evalModel": "balanced",
   "budget": { "maxPerRun": 2.0, "maxPerExperiment": 0.5, "trackCosts": true },
@@ -208,17 +217,27 @@ console.log(`Total cost: $${log.totalCostUsd}`);
 ```
 ResearchOrchestrator
   ├── router.ts         — keyword heuristic → best-fit model (GLM-5.0 aware)
-  ├── evaluator.ts      — streaming calls across 10 providers, rate-limit tracking
-  ├── scorer.ts         — LLM judge: structured rubric, Zod validation, retry
-  ├── orchestrator.ts   — parallel arms, quality gate, budget guard, TTFT tracking
-  ├── memory.ts         — SQLite: ~/.modelab/memory.db (LCM Memory v2)
-  ├── cache.ts          — SHA-256 hash cache: ~/.modelab/cache.json
+  ├── routing_v2.ts    — learned routing: performance-based, reads from lesson_engine
+  ├── evaluator.ts     — streaming calls across 10 providers, rate-limit tracking
+  ├── scorer.ts        — LLM judge: structured rubric, Zod validation, retry
+  ├── orchestrator.ts  — parallel arms, quality gate, budget guard, TTFT tracking
+  ├── lesson_engine.ts — self-iteration: parses lessons, writes router adjustments
+  ├── embedding_store.ts — TF-IDF / Ollama embeddings for semantic memory
+  ├── complexity.ts    — task complexity profiling
+  ├── memory.ts        — SQLite: ~/.modelab/memory.db (LCM Memory v2)
+  ├── cache.ts         — SHA-256 hash cache: ~/.modelab/cache.json
   ├── templates.ts     — 7 built-in prompt templates
-  └── export.ts         — json / markdown / html reports
+  └── export.ts        — json / markdown / html reports
 ```
 
 ---
 
-## Built with teeth. 🌑
+## Links + License
+
+- npm: <https://www.npmjs.com/package/modelab>
+- Issues: <https://github.com/darks0l/modelab/issues>
+- Changelog: [CHANGELOG.md](./CHANGELOG.md)
 
 MIT License
+
+Built with teeth. 🌑
