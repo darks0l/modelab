@@ -2,10 +2,10 @@ import type { ModelConfig } from './types.js';
 export interface ScoreResult {
     score: number;
     reasoning: string;
-    clarity: number;
-    correctness: number;
-    completeness: number;
-    /** Set when scoring/parsing fails — score will be null in this case */
+    clarity?: number;
+    correctness?: number;
+    completeness?: number;
+    /** Set when scoring/parsing fails — score will be 0 in this case */
     error?: string | null;
 }
 /**

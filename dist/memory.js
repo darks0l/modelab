@@ -71,10 +71,75 @@ function openDb() {
     return db;
 }
 export class ExperimentMemory {
+    /** @internal */
     db;
-    constructor() {
-        this.db = openDb();
+    constructor(dbPath) {
+        this.db = dbPath ? new Database(dbPath) : openDb();
+        if (dbPath) {
+            this.db.pragma('journal_mode = WAL');
+            this.db.exec(`
+        CREATE TABLE IF NOT EXISTS experiments (
+          id           TEXT  NOT NULL,
+          run_id       TEXT  NOT NULL,
+          goal_id      TEXT  NOT NULL,
+          arm_id       TEXT  NOT NULL,
+          score        REAL,
+          cost_usd     REAL  NOT NULL,
+          input_tokens INTEGER NOT NULL,
+          output_tokens INTEGER NOT NULL,
+          output       TEXT  NOT NULL,
+          model        TEXT  NOT NULL,
+          duration_ms  INTEGER NOT NULL,
+          latency_ms   INTEGER NOT NULL DEFAULT 0,
+          iteration    INTEGER NOT NULL,
+          timestamp    TEXT  NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS iteration_summaries (
+          id           TEXT  NOT NULL PRIMARY KEY,
+          run_id       TEXT  NOT NULL,
+          goal_id      TEXT  NOT NULL,
+          iteration    INTEGER NOT NULL,
+          best_score   REAL,
+          best_arm_id  TEXT,
+          best_latency_ms INTEGER,
+          what_worked  TEXT  NOT NULL DEFAULT '',
+          what_didnt_work TEXT  NOT NULL DEFAULT '',
+          lesson       TEXT  NOT NULL DEFAULT '',
+          summary_text TEXT  NOT NULL DEFAULT '',
+          created_at   TEXT  NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS run_summaries (
+          run_id       TEXT  NOT NULL PRIMARY KEY,
+          goal_id      TEXT  NOT NULL,
+          status       TEXT  NOT NULL,
+          total_cost_usd REAL NOT NULL DEFAULT 0,
+          total_arms   INTEGER NOT NULL DEFAULT 0,
+          total_iterations INTEGER NOT NULL DEFAULT 0,
+          best_score   REAL,
+          best_arm_id  TEXT,
+          best_iteration INTEGER,
+          best_latency_ms INTEGER,
+          avg_latency_ms INTEGER NOT NULL DEFAULT 0,
+          started_at   TEXT  NOT NULL,
+          completed_at TEXT  NOT NULL,
+          duration_ms  INTEGER NOT NULL DEFAULT 0,
+          lesson       TEXT  NOT NULL DEFAULT '',
+          report       TEXT  NOT NULL DEFAULT '',
+          created_at   TEXT  NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_goal_id ON experiments(goal_id);
+        CREATE INDEX IF NOT EXISTS idx_run_id  ON experiments(run_id);
+        CREATE INDEX IF NOT EXISTS idx_arm_id  ON experiments(arm_id);
+        CREATE INDEX IF NOT EXISTS idx_summary_goal ON iteration_summaries(goal_id);
+        CREATE INDEX IF NOT EXISTS idx_summary_run  ON iteration_summaries(run_id);
+      `);
+        }
     }
+    /**
+     * Test-only constructor — opens a database at the given path instead of ~/.modelab/memory.db.
+     * Used exclusively by the test suite to test against isolated temp databases.
+     * @internal
+     */
     log(result, runId, goalId) {
         const stmt = this.db.prepare(`
       INSERT INTO experiments
@@ -167,13 +232,18 @@ export class ExperimentMemory {
             createdAt: new Date().toISOString(),
         };
     }
-    getSummaries(goalId) {
-        const rows = this.db.prepare(`SELECT * FROM iteration_summaries WHERE goal_id = ? ORDER BY iteration ASC`).all(goalId);
+    getSummaries(goalId, runId) {
+        const sql = runId
+            ? `SELECT * FROM iteration_summaries WHERE goal_id = ? AND run_id = ? ORDER BY iteration ASC`
+            : `SELECT * FROM iteration_summaries WHERE goal_id = ? ORDER BY iteration ASC`;
+        const rows = (runId
+            ? this.db.prepare(sql).all(goalId, runId)
+            : this.db.prepare(sql).all(goalId));
         return rows.map(mapSummaryRow);
     }
     getContextForIteration(goalId, runId, iter) {
-        const priorSummaries = this.getSummaries(goalId)
-            .filter(s => s.runId === runId && s.iteration < iter);
+        const priorSummaries = this.getSummaries(goalId, runId)
+            .filter(s => s.iteration < iter);
         const allPrior = this.getHistory(goalId)
             .filter(r => r.runId === runId && r.iteration < iter);
         const bestOverall = allPrior
@@ -222,7 +292,7 @@ export class ExperimentMemory {
         }));
     }
     summarizeRun(runId, goalId, status, startedAt, completedAt, allResults) {
-        const iterationSummaries = this.getSummaries(goalId)
+        const iterationSummaries = this.getSummaries(goalId, runId)
             .filter(s => s.runId === runId)
             .sort((a, b) => a.iteration - b.iteration);
         const totalCostUsd = allResults.reduce((s, r) => s + r.costUsd, 0);
@@ -311,7 +381,7 @@ export class ExperimentMemory {
             ? this.db.prepare(sql).all(goalId)
             : this.db.prepare(sql).all());
         return rows.map(r => {
-            const iterSummaries = this.getSummaries(r.goal_id).filter(s => s.runId === r.run_id);
+            const iterSummaries = this.getSummaries(r.goal_id, r.run_id);
             const latencyStats = this._latencyStatsForRun(r.run_id);
             return {
                 runId: r.run_id, goalId: r.goal_id, status: r.status,
@@ -330,7 +400,7 @@ export class ExperimentMemory {
         if (rows.length === 0)
             return null;
         const r = rows[0];
-        const iterSummaries = this.getSummaries(r.goal_id).filter(s => s.runId === r.run_id);
+        const iterSummaries = this.getSummaries(r.goal_id, r.run_id);
         const latencyStats = this._latencyStatsForRun(runId);
         return {
             runId: r.run_id, goalId: r.goal_id, status: r.status,

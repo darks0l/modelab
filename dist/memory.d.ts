@@ -1,3 +1,4 @@
+import Database from 'better-sqlite3';
 import type { ExperimentResult } from './types.js';
 export interface IterationSummary {
     id: string;
@@ -65,15 +66,23 @@ export interface IterationContext {
     contextString: string;
 }
 export declare class ExperimentMemory {
-    private db;
+    /** @internal */
+    db: Database.Database;
     constructor();
+    /** @internal - test-only constructor that opens a custom DB path */
+    constructor(dbPath: string);
+    /**
+     * Test-only constructor — opens a database at the given path instead of ~/.modelab/memory.db.
+     * Used exclusively by the test suite to test against isolated temp databases.
+     * @internal
+     */
     log(result: ExperimentResult, runId: string, goalId: string): void;
     getHistory(goalId?: string): ExperimentResult[];
     getBest(goalId: string): ExperimentResult | null;
     getAverageScore(goalId: string): number | null;
     getTotalSpend(goalId?: string): number;
     summarize(runId: string, goalId: string, iteration: number, results: ExperimentResult[]): IterationSummary;
-    getSummaries(goalId: string): IterationSummary[];
+    getSummaries(goalId: string, runId?: string): IterationSummary[];
     getContextForIteration(goalId: string, runId: string, iter: number): IterationContext;
     getLessons(goalId?: string): {
         goalId: string;

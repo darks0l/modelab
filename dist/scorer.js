@@ -3,10 +3,10 @@ import { callModel } from './evaluator.js';
 const ScoreResultSchema = z.object({
     score: z.number().min(0).max(10),
     reasoning: z.string(),
-    clarity: z.number().min(0).max(3),
-    correctness: z.number().min(0).max(4),
-    completeness: z.number().min(0).max(3),
-});
+    clarity: z.number().min(0).max(3).optional(),
+    correctness: z.number().min(0).max(4).optional(),
+    completeness: z.number().min(0).max(3).optional(),
+}).required();
 const RUBRIC = `Score the following answer to the question.\n\nQuestion: {{question}}\n\nAnswer:\n{{answer}}\n\nYou are an impartial evaluator. Score on three dimensions:\n- Clarity (0-3): Is the answer clear, well-organized, and easy to follow?\n- Correctness (0-4): Is the answer factually/reasoningly sound?\n- Completeness (0-3): Does it fully address all parts of the question?\n\nIMPORTANT: Respond ONLY with a valid JSON object. No markdown, no explanation, no text outside the JSON. The JSON must have this exact structure:\n{\n  "score": <0-10 number>,\n  "reasoning": "<1-2 sentence explanation>",\n  "clarity": <0-3 integer>,\n  "correctness": <0-4 integer>,\n  "completeness": <0-3 integer>\n}`;
 /** Score cache — pure function of (question + first 500 chars of output) */
 const scoreCache = new Map();
@@ -80,12 +80,19 @@ function parseScoreResponse(raw) {
         jsonStr = jsonStr.slice(start, end + 1);
     }
     const parsed = JSON.parse(jsonStr);
-    return {
-        score: Math.max(0, Math.min(10, Number(parsed.score) || 0)),
-        reasoning: String(parsed.reasoning ?? ''),
-        clarity: Math.max(0, Math.min(3, Number(parsed.clarity) || 0)),
-        correctness: Math.max(0, Math.min(4, Number(parsed.correctness) || 0)),
-        completeness: Math.max(0, Math.min(3, Number(parsed.completeness) || 0)),
-    };
+    const score = Math.max(0, Math.min(10, Number(parsed.score) ?? 0));
+    const reasoning = String(parsed.reasoning ?? '');
+    const clarity = parsed.clarity !== undefined ? Math.max(0, Math.min(3, Number(parsed.clarity))) : undefined;
+    const correctness = parsed.correctness !== undefined ? Math.max(0, Math.min(4, Number(parsed.correctness))) : undefined;
+    const completeness = parsed.completeness !== undefined ? Math.max(0, Math.min(3, Number(parsed.completeness))) : undefined;
+    // Build result object — omit fields entirely when missing so Zod's .required() can reject
+    const result = { score, reasoning };
+    if (clarity !== undefined)
+        result.clarity = clarity;
+    if (correctness !== undefined)
+        result.correctness = correctness;
+    if (completeness !== undefined)
+        result.completeness = completeness;
+    return result;
 }
 //# sourceMappingURL=scorer.js.map

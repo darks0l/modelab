@@ -5,18 +5,18 @@ import { callModel } from './evaluator.js';
 const ScoreResultSchema = z.object({
   score: z.number().min(0).max(10),
   reasoning: z.string(),
-  clarity: z.number().min(0).max(3),
-  correctness: z.number().min(0).max(4),
-  completeness: z.number().min(0).max(3),
-});
+  clarity: z.number().min(0).max(3).optional(),
+  correctness: z.number().min(0).max(4).optional(),
+  completeness: z.number().min(0).max(3).optional(),
+}).required();
 
 export interface ScoreResult {
   score: number;
   reasoning: string;
-  clarity: number;
-  correctness: number;
-  completeness: number;
-  /** Set when scoring/parsing fails — score will be null in this case */
+  clarity?: number;
+  correctness?: number;
+  completeness?: number;
+  /** Set when scoring/parsing fails — score will be 0 in this case */
   error?: string | null;
 }
 
@@ -108,11 +108,16 @@ function parseScoreResponse(raw: string): ScoreResult {
   }
 
   const parsed = JSON.parse(jsonStr);
-  return {
-    score: Math.max(0, Math.min(10, Number(parsed.score) || 0)),
-    reasoning: String(parsed.reasoning ?? ''),
-    clarity: Math.max(0, Math.min(3, Number(parsed.clarity) || 0)),
-    correctness: Math.max(0, Math.min(4, Number(parsed.correctness) || 0)),
-    completeness: Math.max(0, Math.min(3, Number(parsed.completeness) || 0)),
-  };
+  const score = Math.max(0, Math.min(10, Number(parsed.score) ?? 0));
+  const reasoning = String(parsed.reasoning ?? '');
+  const clarity = parsed.clarity !== undefined ? Math.max(0, Math.min(3, Number(parsed.clarity))) : undefined;
+  const correctness = parsed.correctness !== undefined ? Math.max(0, Math.min(4, Number(parsed.correctness))) : undefined;
+  const completeness = parsed.completeness !== undefined ? Math.max(0, Math.min(3, Number(parsed.completeness))) : undefined;
+
+  // Build result object — omit fields entirely when missing so Zod's .required() can reject
+  const result: Record<string, unknown> = { score, reasoning };
+  if (clarity !== undefined) result.clarity = clarity;
+  if (correctness !== undefined) result.correctness = correctness;
+  if (completeness !== undefined) result.completeness = completeness;
+  return result as Omit<ScoreResult, 'error'>;
 }

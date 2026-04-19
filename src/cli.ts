@@ -94,7 +94,8 @@ USAGE
   modelab cache --clear                   Clear the result cache
   modelab route --task <text> [--mode quality|latency|cost]  Show model routing decision
   modelab lessons [--goal-id <id>]        Show what the system learned across runs
-  modelab report <run-id>                 Show full run report with lessons + latency
+  modelab experiments [--limit N] [--sort date|score|cost]  List all runs with summary stats
+  modelab review [run-id]                 Interactive run review (full latency + lesson breakdown)
   modelab --help                          Show this help
 
 RUN OPTIONS
@@ -746,6 +747,8 @@ switch (subcommand) {
   case 'lessons':     cmdLessons(subArgs);     break;
   case 'report':      cmdReport(subArgs);       break;
   case 'interactive': cmdInteractive();         break;
+  case 'experiments': cmdExperiments(subArgs);    break;
+  case 'review':      cmdReview(subArgs);          break;
   case '--help':
   case '-h':
   case undefined:     printHelp();             break;
@@ -949,6 +952,182 @@ async function cmdReport(args: string[]) {
 
   console.log(`${'─'.repeat(70)}\n`);
   memory.close();
+}
+
+// ── Experiments (all runs summary) ─────────────────────────────────────────────────
+
+/**
+ * modelab experiments
+ * Shows a summary table of all research runs with scores, cost, latency, and status.
+ * Sortable by column. Best for finding which runs are worth a deeper look.
+ */
+async function cmdExperiments(args: string[]) {
+  const memory = new ExperimentMemory();
+  const limit = parseInt(extractArg(args, '--limit') ?? '20', 10);
+  const sortBy = extractArg(args, '--sort') ?? 'date'; // date | score | cost
+
+  const summaries = memory.getRunSummaries();
+  if (summaries.length === 0) {
+    console.log('\nNo research runs yet. Run: modelab run --goal "..."');
+    memory.close();
+    return;
+  }
+
+  // Sort
+  const sorted = [...summaries];
+  if (sortBy === 'score') {
+    sorted.sort((a, b) => (b.bestScore ?? 0) - (a.bestScore ?? 0));
+  } else if (sortBy === 'cost') {
+    sorted.sort((a, b) => b.totalCostUsd - a.totalCostUsd);
+  } else {
+    sorted.sort((a, b) => new Date(b.startedAt).getTime() - new Date(a.startedAt).getTime());
+  }
+
+  const shown = sorted.slice(0, limit);
+  const totalCost = summaries.reduce((s, r) => s + r.totalCostUsd, 0);
+  const totalRuns = summaries.length;
+  const avgScore = summaries.filter(r => r.bestScore !== null)
+    .reduce((s, r, _, a) => s + (r.bestScore ?? 0) / a.length, 0);
+
+  console.log('\n');
+  console.log('  \x1b[36m\x1b[1m🌑 modelab — All Experiments\x1b[0m');
+  console.log('  ' + '─'.repeat(80));
+  console.log(`  \x1b[2mTotal runs: ${totalRuns}  ·  Total spend: $${totalCost.toFixed(4)}  ·  Avg best score: ${avgScore.toFixed(1)}/10\x1b[0m`);
+  console.log('  ' + '─'.repeat(80));
+  console.log('  \x1b[1m  DATE       RUN       GOAL                    STATUS     SCORE  COST      TTFT(p50)  ARMS ITERS\x1b[0m');
+  console.log('  ' + '─'.repeat(80));
+
+  for (const s of shown) {
+    const date = new Date(s.startedAt).toLocaleDateString('en-US', { month: '2-digit', day: '2-digit' });
+    const time = new Date(s.startedAt).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false });
+    const statusStr = s.status.replace('_', ' ').padEnd(10).slice(0, 10);
+    const scoreStr = s.bestScore !== null ? `\x1b[33m${s.bestScore.toFixed(1)}/10\x1b[0m` : '    —  ';
+    const costStr = `$${s.totalCostUsd.toFixed(4)}`;
+    const latencyStr = s.latencyStats.sampleCount > 0 ? `${s.latencyStats.p50Ms}ms` : '  —  ';
+    const goalTrunc = s.goalId.length > 22 ? s.goalId.slice(0, 22) + '…' : s.goalId.padEnd(22);
+    const runIdShort = s.runId.slice(0, 8);
+    const statusColor2 = s.status.includes('quality') ? '\x1b[32m' : s.status.includes('budget') ? '\x1b[33m' : s.status === 'failed' ? '\x1b[31m' : '\x1b[32m';
+
+    console.log(
+      `  ${date} ${time}  ${runIdShort}  ${goalTrunc}  ${statusColor2}${statusStr}\x1b[0m  ${scoreStr}  ${costStr.padStart(8)}  ${latencyStr.padStart(8)}   ${String(s.totalArms).padStart(4)}  ${String(s.totalIterations).padStart(5)}`
+    );
+  }
+
+  console.log('  ' + '─'.repeat(80));
+  console.log('  \x1b[2mSort: --sort date|score|cost  ·  Limit: --limit N  ·  Detail: modelab review <run-id>\x1b[0m\n');
+  memory.close();
+}
+
+// ── Review (detailed single-run view) ───────────────────────────────────────────
+
+/**
+ * modelab review <run-id>
+ * Full terminal report for a single run — latency breakdown, per-iteration lessons,
+ * per-arm results, and what the system learned.
+ */
+async function cmdReview(args: string[]) {
+  const memory = new ExperimentMemory();
+  const runId = args.find(a => !a.startsWith('--'));
+
+  if (!runId) {
+    // Interactive run selector
+    const summaries = memory.getRunSummaries();
+    if (summaries.length === 0) {
+      console.log('No runs to review. Run: modelab run --goal "..."');
+      memory.close();
+      return;
+    }
+    const items: MenuItem[] = summaries.slice(0, 30).map(s => ({
+      id: s.runId,
+      label: `${s.runId.slice(0, 8)}…  \x1b[33m${s.bestScore !== null ? s.bestScore.toFixed(1) + '/10' : '—'}\x1b[0m  ${s.status.replace('_', ' ')}  $${s.totalCostUsd.toFixed(4)}`,
+      sublabel: new Date(s.startedAt).toLocaleString(),
+    }));
+    const selected = await interactiveSelect(
+      '\n\x1b[36m\x1b[1m🔍 Select a Run to Review\x1b[0m\n',
+      items,
+      (item) => `${item.label}  \x1b[2m${item.sublabel ?? ''}\x1b[0m`
+    );
+    if (!selected) { memory.close(); return; }
+    await printReview(memory, selected);
+  } else {
+    const summary = memory.getRun(runId);
+    if (!summary) {
+      console.error(`❌ No run found: ${runId}`);
+      memory.close();
+      process.exit(1);
+    }
+    await printReview(memory, runId);
+  }
+
+  memory.close();
+}
+
+async function printReview(memory: ExperimentMemory, runId: string) {
+  const summary = memory.getRun(runId);
+  if (!summary) return;
+
+  const latency = summary.latencyStats;
+  const results = memory.getHistory(summary.goalId).filter(r => r.runId === runId);
+
+  // Header
+  console.log('\n');
+  console.log('  \x1b[36m\x1b[1m🌑 Run Review\x1b[0m — ' + runId.slice(0, 8) + '…');
+  console.log('  ' + '─'.repeat(74));
+
+  // Meta row
+  const statusStr = summary.status.replace('_', ' ');
+  const statusCol = summary.status.includes('quality') ? '\x1b[32m✅ ' + statusStr : summary.status.includes('budget') ? '\x1b[33m💸 ' + statusStr : summary.status === 'failed' ? '\x1b[31m❌ ' + statusStr : '\x1b[32m🏁 ' + statusStr;
+  console.log(`  ${statusCol}\x1b[0m  ·  Started: ${new Date(summary.startedAt).toLocaleString()}  ·  Duration: ${(summary.durationMs / 1000).toFixed(1)}s`);
+
+  // Score + cost row
+  if (summary.bestScore !== null) {
+    console.log(`  \x1b[33m\x1b[1m⭐ ${summary.bestScore}/10\x1b[0m ${summary.bestArmId} (iter ${summary.bestIteration ?? '?'})  ·  Cost: $${summary.totalCostUsd.toFixed(4)}  ·  Arms: ${summary.totalArms} × ${summary.totalIterations} iter`);
+  } else {
+    console.log(`  No scored results  ·  Cost: $${summary.totalCostUsd.toFixed(4)}  ·  Arms: ${summary.totalArms} × ${summary.totalIterations} iter`);
+  }
+
+  // Latency row (if we have data)
+  if (latency.sampleCount > 0) {
+    const bestLatStr = latency.bestMs !== null ? `  ·  Best: ${latency.bestMs}ms (${summary.iterationSummaries.find(s => s.bestLatencyMs === latency.bestMs)?.bestArmId ?? '?'})` : '';
+    console.log(`  \x1b[2mTTFT:  avg ${latency.avgMs}ms  ·  p50 ${latency.p50Ms}ms  ·  p95 ${latency.p95Ms}ms  ·  min ${latency.minMs}ms  ·  max ${latency.maxMs}ms (n=${latency.sampleCount})${bestLatStr}\x1b[0m`);
+  }
+
+  // Lesson
+  if (summary.lesson) {
+    console.log('\n  \x1b[1m💡 Lesson:\x1b[0m');
+    console.log(`  ${summary.lesson}`);
+  }
+
+  // Per-iteration breakdown
+  if (summary.iterationSummaries.length > 0) {
+    console.log('\n  \x1b[1m📝 Iteration Breakdown\x1b[0m');
+    for (const s of summary.iterationSummaries) {
+      const scoreStr = s.bestScore !== null ? `\x1b[33m⭐ ${s.bestScore}/10\x1b[0m` : '  —  ';
+      const latencyStr = s.bestLatencyMs !== null ? `  TTFT:${s.bestLatencyMs}ms` : '';
+      console.log(`  \x1b[36mIter ${s.iteration}\x1b[0m  ${scoreStr}  ${s.bestArmId ?? '?'}${latencyStr}`);
+      if (s.lesson) console.log(`          ${s.lesson}`);
+      if (s.whatWorked) console.log(`          \x1b[32m✓\x1b[0m ${s.whatWorked.slice(0, 120)}${s.whatWorked.length > 120 ? '…' : ''}`);
+      if (s.whatDidntWork) console.log(`          \x1b[31m✗\x1b[0m ${s.whatDidntWork.slice(0, 120)}${s.whatDidntWork.length > 120 ? '…' : ''}`);
+    }
+  }
+
+  // Per-arm results table
+  if (results.length > 0) {
+    console.log('\n  \x1b[1m📊 All Arms\x1b[0m');
+    console.log('  ' + '─'.repeat(74));
+    const sorted = [...results].sort((a, b) => (b.score ?? 0) - (a.score ?? 0));
+    for (const r of sorted) {
+      const scoreStr = r.score !== null ? `\x1b[33m${r.score.toFixed(1)}/10\x1b[0m` : '     —  ';
+      const cached = r.cached ? ' \x1b[2m[ch]\x1b[0m' : '';
+      const ttft = r.latencyMs > 0 ? `  TTFT:${String(r.latencyMs).padStart(4)}ms` : '            ';
+      const outLen = r.output.length;
+      const truncated = r.output.replace(/\n/g, ' ').slice(0, 60).padEnd(60);
+      console.log(`  ${r.armId.padEnd(20)} ${scoreStr}  $${r.costUsd.toFixed(4)}${cached}${ttft}  ${truncated}`);
+    }
+  }
+
+  console.log('  ' + '─'.repeat(74));
+  console.log('  Full output: modelab export ' + runId + ' --format md\n');
 }
 
 function statusColor(status: string): string {
