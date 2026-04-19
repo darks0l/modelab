@@ -536,12 +536,27 @@ async function cmdRun(args: string[]) {
     process.exit(1);
   }
 
-  // Build arms
-  const armModels = extractArg(args, '--arms')?.split(',').map(s => s.trim()) ?? Object.keys(config.models).slice(0, 2);
-  const invalidModels = armModels.filter(m => !config.models[m]);
-  if (invalidModels.length > 0) {
-    console.error(`❌ Unknown models: ${invalidModels.join(', ')}. Available: ${Object.keys(config.models).join(', ')}`);
-    process.exit(1);
+  // Auto-route with learned routing v2 when --arms is not specified
+  const armModelsArg = extractArg(args, '--arms');
+  let armModels: string[];
+  if (armModelsArg) {
+    armModels = armModelsArg.split(',').map(s => s.trim());
+    // Validate manually-specified models
+    const invalidModels = armModels.filter(m => !config.models[m]);
+    if (invalidModels.length > 0) {
+      console.error(`❌ Unknown models: ${invalidModels.join(', ')}. Available: ${Object.keys(config.models).join(', ')}`);
+      process.exit(1);
+    }
+  } else {
+    // Auto-select top 2 models using learned routing v2
+    const mode = 'quality';
+    const routed = routeTaskV2(goalText, config.models, mode, memory);
+    armModels = routed.candidates.slice(0, 2).map(c => c.key);
+    console.log(`   Auto-route: ${routed.taskProfile.taskType} task (complexity ${routed.taskProfile.complexity}/10)`);
+    console.log(`   Routing: ${routed.reasoning}`);
+    if (routed.fallbackDecision) {
+      console.log(`   Keyword fallback: ${routed.fallbackDecision.reasoning}`);
+    }
   }
 
   // Temperature sweep: --temperature-sweep 0,0.3,0.7,1.0 expands each arm into multiple temp variants

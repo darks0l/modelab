@@ -8,6 +8,7 @@
  */
 
 import type { ModelConfig, ExperimentResult } from './types.js';
+import { routeTask as oldRouteTask } from './router.js';
 import { ExperimentMemory } from './memory.js';
 import { getLessonEngine } from './lesson_engine.js';
 
@@ -353,8 +354,7 @@ export function routeTaskV2(
   const taskProfile = buildTaskProfile(task, mode);
 
   // 2. Get the old keyword router's decision (for comparison)
-  const { routeTask: oldRoute } = require('./router.js');
-  const fallbackDecision = oldRoute(task, modelConfigs, mode);
+  const fallbackDecision = oldRouteTask(task, modelConfigs, mode);
 
   // 3. Build model profiles from history
   const modelProfiles = buildModelProfiles(modelConfigs, memory);

@@ -2,6 +2,14 @@
 
 All notable changes to this project are documented in this file.
 
+## v0.5.0
+
+- feat: learned routing now runs by default — `modelab run` without `--arms` calls `routeTaskV2` to auto-select the top 2 models using performance profiles + task type + history, instead of defaulting to the first 2 models
+- feat: auto-routing decision is printed before the run — shows task type, complexity, routing reasoning, and the keyword-router fallback for comparison
+- fix: `routeTask` was imported but never called in the orchestrator — the orchestrator receives pre-built arms from CLI; routing happens at the CLI layer which now uses routing_v2
+- fix: Ollama embedding IP updated to 192.168.68.73 (current Ollama server)
+- docs: standard GitHub treatment — DARKSOL banner, badges (npm version, license, platform, node >=18), "Built by DARKSOL 🌑" subheading, footer
+
 ## v0.4.3
 
 - fix: routing_v2 scope issue — lessonEngine.getActiveAdjustments/resolveAdjustments now called in correct function scope (was hoisted to top-level module scope)

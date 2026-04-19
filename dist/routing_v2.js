@@ -6,6 +6,7 @@
  *
  * Key idea: routing should LEARN from past runs, not just match keywords.
  */
+import { routeTask as oldRouteTask } from './router.js';
 import { getLessonEngine } from './lesson_engine.js';
 // ── Task profiling helpers ───────────────────────────────────────────────────
 const TASK_TYPE_KEYWORDS = {
@@ -244,8 +245,7 @@ export function routeTaskV2(task, modelConfigs, mode = 'quality', memory) {
     // 1. Build task profile
     const taskProfile = buildTaskProfile(task, mode);
     // 2. Get the old keyword router's decision (for comparison)
-    const { routeTask: oldRoute } = require('./router.js');
-    const fallbackDecision = oldRoute(task, modelConfigs, mode);
+    const fallbackDecision = oldRouteTask(task, modelConfigs, mode);
     // 3. Build model profiles from history
     const modelProfiles = buildModelProfiles(modelConfigs, memory);
     // 3b. Apply learned adjustments from lesson_engine (router_adjustments table)
