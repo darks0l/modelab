@@ -361,6 +361,7 @@ export class ResearchOrchestrator {
     const result: ExperimentResult = {
       armId: arm.id,
       model: arm.model,
+      modelKey: arm.model,
       output,
       outputPreview: output.slice(0, 200),
       outputTruncated: output.length > 200,

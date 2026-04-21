@@ -422,8 +422,9 @@ function buildModelProfiles(
   const history = memory?.getHistory() ?? [];
 
   return Object.entries(modelConfigs).map(([key, config]) => {
-    // Gather all results for this model key across history
-    const modelResults = history.filter(r => r.model === config.model);
+    // Gather all results for this model key across history.
+    // r.modelKey is the config key (e.g. "balanced"), r.model is the actual model name.
+    const modelResults = history.filter(r => r.modelKey === key);
 
     const scores = modelResults.map(r => r.score).filter((s): s is number => s !== null);
     const latencies = modelResults.map(r => r.latencyMs).filter(ms => ms > 0);
@@ -454,7 +455,7 @@ function buildModelProfiles(
         const question = questionMatch[1].trim();
         const taskType = inferTaskType(question);
         const goalResults = history.filter(
-          r => r.goalId === run.goalId && r.model === config.model && r.score !== null
+          r => r.goalId === run.goalId && r.modelKey === key && r.score !== null
         );
         for (const r of goalResults) {
           (taskTypeScores.get(taskType) ?? []).push(r.score ?? 0);

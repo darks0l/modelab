@@ -2,6 +2,7 @@ import Database from 'better-sqlite3';
 import { homedir } from 'os';
 import { mkdirSync, existsSync } from 'fs';
 import { join } from 'path';
+import { randomUUID } from 'crypto';
 import type { ExperimentResult } from './types.js';
 
 /** Task-type keyword detectors (same logic as router.ts) */
@@ -119,6 +120,7 @@ function openDb(): Database.Database {
       output_preview TEXT  NOT NULL DEFAULT '',
       output_truncated INTEGER NOT NULL DEFAULT 0,
       model        TEXT  NOT NULL,
+      model_key   TEXT  NOT NULL DEFAULT '',
       duration_ms  INTEGER NOT NULL,
       latency_ms   INTEGER NOT NULL DEFAULT 0,
       iteration    INTEGER NOT NULL,
@@ -163,6 +165,25 @@ function openDb(): Database.Database {
     CREATE INDEX IF NOT EXISTS idx_summary_goal ON iteration_summaries(goal_id);
     CREATE INDEX IF NOT EXISTS idx_summary_run  ON iteration_summaries(run_id);
   `);
+
+  // Migration: backfill model_key for rows written before the modelKey field was added.
+  // Uses a reverse map of known model names to their config keys.
+  const modelNameToKey: Record<string, string> = {
+    'gpt-4o-mini': 'fast',
+    'claude-sonnet-4-6': 'balanced',
+    'o1': 'reasoning',
+    'qwen3-coder': 'coding',
+    'llama-3.3-70b-versatile': 'groq',
+    'gemini-2.0-flash': 'gemini',
+    'glm-4-flash': 'glm',
+    'glm-4.7': 'glm',
+    'glm-5-flash': 'glm5',
+    'glm-5.1-flash': 'glm51',
+  };
+  for (const [modelName, key] of Object.entries(modelNameToKey)) {
+    db.prepare(`UPDATE experiments SET model_key = ? WHERE model_key = '' AND model = ?`).run(key, modelName);
+  }
+
   return db;
 }
 
@@ -195,6 +216,7 @@ export class ExperimentMemory {
           output_preview TEXT  NOT NULL DEFAULT '',
           output_truncated INTEGER NOT NULL DEFAULT 0,
           model        TEXT  NOT NULL,
+          model_key   TEXT  NOT NULL DEFAULT '',
           duration_ms  INTEGER NOT NULL,
           latency_ms   INTEGER NOT NULL DEFAULT 0,
           iteration    INTEGER NOT NULL,
@@ -251,12 +273,12 @@ export class ExperimentMemory {
     const stmt = this.db.prepare(`
       INSERT INTO experiments
         (id, run_id, goal_id, arm_id, score, cost_usd, input_tokens, output_tokens,
-         output, output_preview, output_truncated, model, duration_ms, latency_ms, iteration, timestamp)
+         output, output_preview, output_truncated, model, model_key, duration_ms, latency_ms, iteration, timestamp)
       VALUES
-        (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
     stmt.run(
-      `${armId(result.armId)}-${Date.now()}`,
+      `${armId(result.armId)}-${randomUUID()}`,
       runId, goalId,
       result.armId, result.score, result.costUsd,
       result.tokensUsed.input, result.tokensUsed.output,
@@ -264,6 +286,7 @@ export class ExperimentMemory {
       result.outputPreview ?? result.output.slice(0, 200),
       result.outputTruncated ? 1 : 0,
       result.model,
+      result.modelKey ?? result.model,
       result.durationMs, result.latencyMs ?? 0, result.iteration, result.timestamp
     );
   }
@@ -1039,6 +1062,7 @@ function mapSummaryRow(r: SummaryRow): IterationSummary {
 
 interface DbRow {
   id: string; run_id: string; goal_id: string; arm_id: string; model: string;
+  model_key: string;
   score: number | null; cost_usd: number; input_tokens: number; output_tokens: number;
   output: string; output_preview: string; output_truncated: number;
   duration_ms: number; latency_ms: number; iteration: number; timestamp: string;
@@ -1046,7 +1070,10 @@ interface DbRow {
 
 function mapRow(r: DbRow): ExperimentResult {
   return {
-    armId: r.arm_id, model: r.model, output: r.output,
+    armId: r.arm_id,
+    model: r.model,
+    modelKey: r.model_key || r.model,
+    output: r.output,
     outputPreview: r.output_preview,
     outputTruncated: Boolean(r.output_truncated),
     score: r.score ?? null, costUsd: r.cost_usd,
