@@ -385,7 +385,7 @@ async function callAnthropic(cfg: ModelConfig, prompt: string, apiKey: string): 
   if (cfg.stream) return streamAnthropic(cfg, baseUrl, apiKey, prompt);
 
   const body: Record<string, unknown> = { model: cfg.model, max_tokens: cfg.maxTokens ?? 1024, messages: [{ role: 'user', content: prompt }] };
-  if (cfg.jsonMode) body.output = { text: { annotations: true }, content: [{ type: 'text', text: '' }] };
+  if (cfg.jsonMode) body.response_format = { type: 'json_object' };
   const res = await fetchWithRetry(`${baseUrl}/messages`, {
     method: 'POST',
     headers: { 'x-api-key': apiKey, 'anthropic-version': '2023-06-01', 'Content-Type': 'application/json' },
@@ -431,9 +431,13 @@ async function streamAnthropic(cfg: ModelConfig, baseUrl: string, apiKey: string
         const data = line.slice(6).trim();
         if (data === '[DONE]') { done = true; break; }
         try {
-          const p = JSON.parse(data) as { type?: string; text?: string; delta?: { text?: string } };
-          const text = p.type === 'content_block' && 'text' in p ? p.text : p.delta?.text;
-          if (text) { output += text; cfg.stream!(text); }
+          const p = JSON.parse(data) as { type?: string; delta?: { type?: string; text?: string } };
+          // Anthropic SSE: content_block_delta events carry text in delta.text
+          if (p.type === 'content_block_delta' && p.delta?.type === 'text' && p.delta.text) {
+            output += p.delta.text;
+            cfg.stream!(p.delta.text);
+          }
+          // Other event types (message_start, content_block_start, content_block_stop, message_stop) are ignored
         } catch { /* skip */ }
       }
     }
