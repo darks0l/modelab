@@ -283,7 +283,7 @@ export class ResearchOrchestrator {
           cached: true,
           runId,
           goalId: goal.id,
-          model: arm.model,
+          // Keep cached.model (actual model name) — don't overwrite with config key
           durationMs: cached.durationMs ?? 0,
           latencyMs: 0,
         };
@@ -360,7 +360,7 @@ export class ResearchOrchestrator {
 
     const result: ExperimentResult = {
       armId: arm.id,
-      model: arm.model,
+      model: this.models[arm.model]?.model ?? arm.model,
       modelKey: arm.model,
       output,
       outputPreview: output.slice(0, 200),

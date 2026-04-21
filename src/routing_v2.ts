@@ -205,7 +205,8 @@ function scoreModelForTask(
 
 interface PastRunContext {
   similarGoalKey: string;
-  bestModelForGoal: string;
+  /** Config key (e.g. "balanced") — NOT the actual model name */
+  bestModelKeyForGoal: string;
   bestScoreForGoal: number;
   cosineSimilarity: number;
 }
@@ -257,7 +258,7 @@ function findSimilarPastRuns(
     if (similarity > 0.7) {
       results.push({
         similarGoalKey: goalId,
-        bestModelForGoal: result.model,
+        bestModelKeyForGoal: result.modelKey, // config key (e.g. "balanced"), not actual model name
         bestScoreForGoal: result.score ?? 0,
         cosineSimilarity: similarity,
       });
@@ -310,17 +311,17 @@ function applyHistoryBoost(
   const boostMap = new Map<string, number>();
   const similarityMap = new Map<string, number>();
   for (const ctx of pastRuns) {
-    const existing = boostMap.get(ctx.bestModelForGoal) ?? 0;
+    const existing = boostMap.get(ctx.bestModelKeyForGoal) ?? 0;
     const boost = ctx.cosineSimilarity * (ctx.bestScoreForGoal / 10);
-    boostMap.set(ctx.bestModelForGoal, existing + boost);
-    const prevSim = similarityMap.get(ctx.bestModelForGoal) ?? 0;
-    if (ctx.cosineSimilarity > prevSim) similarityMap.set(ctx.bestModelForGoal, ctx.cosineSimilarity);
+    boostMap.set(ctx.bestModelKeyForGoal, existing + boost);
+    const prevSim = similarityMap.get(ctx.bestModelKeyForGoal) ?? 0;
+    if (ctx.cosineSimilarity > prevSim) similarityMap.set(ctx.bestModelKeyForGoal, ctx.cosineSimilarity);
   }
 
   return candidates.map(c => {
-    const boost = boostMap.get(c.model) ?? 0;
+    const boost = boostMap.get(c.key) ?? 0; // c.key = config key, matches modelKey from history
     const capped = Math.min(boost, 0.3);
-    const sim = similarityMap.get(c.model);
+    const sim = similarityMap.get(c.key);
     return {
       ...c,
       score: Math.min(1, c.score + capped),
