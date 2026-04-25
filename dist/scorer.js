@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { createHash } from 'crypto';
 import { callModel } from './evaluator.js';
 const ScoreResultSchema = z.object({
     score: z.number().min(0).max(10),
@@ -8,7 +9,7 @@ const ScoreResultSchema = z.object({
     completeness: z.number().min(0).max(3).optional(),
 }).required();
 const RUBRIC = `Score the following answer to the question.\n\nQuestion: {{question}}\n\nAnswer:\n{{answer}}\n\nYou are an impartial evaluator. Score on three dimensions:\n- Clarity (0-3): Is the answer clear, well-organized, and easy to follow?\n- Correctness (0-4): Is the answer factually/reasoningly sound?\n- Completeness (0-3): Does it fully address all parts of the question?\n\nIMPORTANT: Respond ONLY with a valid JSON object. No markdown, no explanation, no text outside the JSON. The JSON must have this exact structure:\n{\n  "score": <0-10 number>,\n  "reasoning": "<1-2 sentence explanation>",\n  "clarity": <0-3 integer>,\n  "correctness": <0-4 integer>,\n  "completeness": <0-3 integer>\n}`;
-/** Score cache — pure function of (question + first 500 chars of output) */
+/** Score cache — keyed by SHA-256 of (question + full output) */
 const scoreCache = new Map();
 /**
  * Evaluate a model output against a question using an LLM judge.
@@ -16,8 +17,8 @@ const scoreCache = new Map();
  * Caches results to avoid double LLM calls on repeated (question, output) pairs.
  */
 export async function scoreOutput(output, question, evalModel, maxRetries = 2) {
-    // Cache key: hash of question + first 500 chars of output (stable, fast)
-    const cacheKey = `${question}\x00${output.slice(0, 500)}`;
+    // Cache key: stable hash of question + full output — avoids collision from truncated outputs
+    const cacheKey = createHash('sha256').update(`${question}\x00${output}`).digest('hex');
     const cached = scoreCache.get(cacheKey);
     if (cached)
         return cached;

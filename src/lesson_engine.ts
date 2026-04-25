@@ -49,6 +49,13 @@ export interface RouterAdjustment {
   expiresAt: string | null;
 }
 
+export interface ModelAdvice {
+  modelKey: string;
+  adjustmentType: 'score_delta' | 'weight_boost' | 'temp_override';
+  delta: number;
+  reason: string;
+}
+
 export interface ResolvedAdjustment {
   modelKey: string;
   /** The primary type of the most recent adjustment (for display only) */
@@ -550,6 +557,49 @@ export class LessonEngine {
     }
 
     return applied;
+  }
+
+  /**
+   * Read back router adjustments for a given task type and return actionable advice
+   * for the next iteration. This closes the self-iteration loop: lessons learned are
+   * applied to subsequent arm selection.
+   */
+  getAdvice(taskType: string | undefined): ModelAdvice[] {
+    if (!taskType) return [];
+
+    // Find all non-expired adjustments whose reason mentions this task type
+    const rows = this.db.prepare(`
+      SELECT model_key, adjustment_type, delta, reason, expires_at, created_at
+      FROM router_adjustments
+      WHERE (expires_at IS NULL OR expires_at > datetime('now'))
+        AND reason LIKE ?
+      ORDER BY created_at DESC
+    `).all(`%${taskType}%`) as Array<{
+      model_key: string;
+      adjustment_type: string;
+      delta: number;
+      reason: string;
+      expires_at: string | null;
+      created_at: string;
+    }>;
+
+    if (rows.length === 0) return [];
+
+    // Deduplicate: keep only the most recent adjustment per model+type combo
+    const seen = new Set<string>();
+    const advice: ModelAdvice[] = [];
+    for (const row of rows) {
+      const key = `${row.model_key}:${row.adjustment_type}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      advice.push({
+        modelKey: row.model_key,
+        adjustmentType: row.adjustment_type as ModelAdvice['adjustmentType'],
+        delta: row.delta,
+        reason: row.reason,
+      });
+    }
+    return advice;
   }
 
   // ── Helper ─────────────────────────────────────────────────────────────────

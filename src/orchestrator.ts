@@ -4,7 +4,7 @@ import { callModelFull, estimateTokens } from './evaluator.js';
 import { scoreOutput } from './scorer.js';
 import { ExperimentMemory, type IterationContext } from './memory.js';
 import { Cache } from './cache.js';
-import { getLessonEngine } from './lesson_engine.js';
+import { getLessonEngine, type ModelAdvice } from './lesson_engine.js';
 import { estimateComplexity } from './complexity.js';
 import { getEmbeddingStore } from './embedding_store.js';
 
@@ -87,10 +87,22 @@ export class ResearchOrchestrator {
     });
 
     let lastIterSummary: ReturnType<typeof this.memory.summarize> | undefined;
+    let lastLessonAdvice = ''; // Self-iteration: advice from lesson engine to inject next iteration
+    const taskType = estimateComplexity(goal.question);
     try {
       for (let iter = 1; iter <= goal.maxIterations; iter++) {
         // Cross-iteration learning: pull context ONCE per iteration (not per-arm)
         const iterContext = this.memory.getContextForIteration(goal.id, runId, iter);
+
+        // Self-iteration: inject advice from lesson engine (closed loop — lessons affect next iteration)
+        if (lastLessonAdvice) {
+          iterContext.contextString = (iterContext.contextString
+            ? iterContext.contextString + '\n\n## Iteration Lesson (applied to this run)\n' + lastLessonAdvice
+            : '## Iteration Lesson (applied to this run)\n' + lastLessonAdvice);
+          this.progress(`\n🧠 Self-iteration advice injected: ${lastLessonAdvice.slice(0, 120)}…`);
+          lastLessonAdvice = ''; // Clear after use
+        }
+
         if (iterContext.contextString) {
           this.progress(`\n📚 Prior context loaded (${iterContext.priorIterations.length} prior iteration${iterContext.priorIterations.length !== 1 ? 's' : ''}, best so far: ${iterContext.bestScoreSoFar !== null ? iterContext.bestScoreSoFar + '/10' : 'N/A'})`);
         }
@@ -172,6 +184,27 @@ export class ResearchOrchestrator {
         if (iterResults.length > 0) {
           lastIterSummary = this.memory.summarize(runId, goal.id, iter, iterResults);
           this.progress(`  📝 Lesson: ${lastIterSummary.lesson}`);
+
+          // Self-iteration: write lesson to lesson engine, then immediately read advice back
+          // for the next iteration's context injection (closes the self-iteration loop)
+          try {
+            const lessonEngine = getLessonEngine();
+            lessonEngine.processRunLesson(lastIterSummary.lesson, {
+              taskType,
+              score: bestResult?.score ?? undefined,
+            });
+            // Read advice back so it can be injected next iteration
+            const advice = lessonEngine.getAdvice(taskType);
+            if (advice.length > 0) {
+              lastLessonAdvice = advice
+                .map(a => `- ${a.adjustmentType === 'score_delta' ? `${a.modelKey}: score ${a.delta > 0 ? '+' : ''}${a.delta} (${a.reason})` : a.adjustmentType === 'weight_boost' ? `${a.modelKey}: weight boost ${a.delta} (${a.reason})` : `${a.modelKey}: temp override ${a.delta} (${a.reason})`}`)
+                .join('\n');
+              this.progress(`  🧠 Self-iteration: will apply [${advice.length}] adjustment(s) next iteration`);
+            }
+          } catch (err) {
+            // Non-critical — don't break the run for lesson engine failures
+            console.warn('[orchestrator] self-iteration lesson processing failed:', err instanceof Error ? err.message : String(err));
+          }
         }
 
         if (bestResult && bestResult.score !== null && bestResult.score >= goal.qualityThreshold) {
@@ -208,21 +241,19 @@ export class ResearchOrchestrator {
       allResults
     );
 
-    // ── Self-iteration: apply lessons + index embeddings ────────────────────────
-    // These are fire-and-forget — never block the run result
+    // ── Post-run: index embeddings ─────────────────────────────────────────────
+    // Self-iteration lesson engine already applied per-iteration in the loop above.
+    // Only embeddings indexing remains as fire-and-forget post-run work.
     try {
-      const lessonEngine = getLessonEngine();
       const embeddingStore = getEmbeddingStore();
-      const taskType = estimateComplexity(goal.question);
-
-      // Index this run's result in the semantic memory store
       const runSummary = allResults.length > 0
         ? `Run ${runId.slice(0, 8)} | ${allResults.length} arms | best: ${bestResult?.score ?? 'N/A'}/10 | question: ${goal.question}`
         : goal.question;
       embeddingStore.storeRunEmbedding(runId, goal.question, runSummary);
 
-      // Update model profiles with this run's outcomes
+      // Update model profiles with this run's outcomes (cross-run learning)
       if (allResults.length > 0) {
+        const lessonEngine = getLessonEngine();
         const profileResults = allResults.map(r => ({
           model: r.model,
           score: r.score,
@@ -231,19 +262,9 @@ export class ResearchOrchestrator {
           armId: r.armId,
         }));
         lessonEngine.updateProfiles(profileResults, goal.question);
-
-        // Also apply auto-lessons from the iteration summary (processRunLesson)
-        // Reuse lastIterSummary from the loop — don't call summarize again
-        if (lastIterSummary?.lesson) {
-          lessonEngine.processRunLesson(lastIterSummary.lesson, {
-            taskType,
-            score: bestResult?.score ?? undefined,
-          });
-        }
       }
     } catch (err) {
-      // Non-critical — log but don't fail the run result
-      console.warn('[orchestrator] self-iteration hook failed:', err instanceof Error ? err.message : String(err));
+      console.warn('[orchestrator] post-run indexing failed:', err instanceof Error ? err.message : String(err));
     }
 
     return {
@@ -283,7 +304,8 @@ export class ResearchOrchestrator {
           cached: true,
           runId,
           goalId: goal.id,
-          // Keep cached.model (actual model name) — don't overwrite with config key
+          model: modelConfig.model ?? arm.model,
+          modelKey: arm.model,
           durationMs: cached.durationMs ?? 0,
           latencyMs: 0,
         };

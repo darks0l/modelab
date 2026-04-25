@@ -55,8 +55,10 @@ export interface ExperimentArm {
 }
 export interface ExperimentResult {
     armId: string;
-    /** The model config key used for this arm (e.g. "balanced", "fast", "reasoning") */
+    /** The actual model name used (e.g. "claude-sonnet-4-6", "glm-4-flash") */
     model: string;
+    /** The model config key used (e.g. "balanced", "fast", "reasoning") — used for routing history lookups */
+    modelKey: string;
     output: string;
     /** First 200 chars of output — for quick preview in tables/history */
     outputPreview: string;

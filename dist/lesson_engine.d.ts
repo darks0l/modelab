@@ -41,6 +41,12 @@ export interface RouterAdjustment {
     createdAt?: string;
     expiresAt: string | null;
 }
+export interface ModelAdvice {
+    modelKey: string;
+    adjustmentType: 'score_delta' | 'weight_boost' | 'temp_override';
+    delta: number;
+    reason: string;
+}
 export interface ResolvedAdjustment {
     modelKey: string;
     /** The primary type of the most recent adjustment (for display only) */
@@ -149,6 +155,12 @@ export declare class LessonEngine {
         score?: number;
         temperature?: number;
     }): LessonApplication[];
+    /**
+     * Read back router adjustments for a given task type and return actionable advice
+     * for the next iteration. This closes the self-iteration loop: lessons learned are
+     * applied to subsequent arm selection.
+     */
+    getAdvice(taskType: string | undefined): ModelAdvice[];
     private _modelNameToKey;
     close(): void;
 }
