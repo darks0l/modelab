@@ -2,6 +2,11 @@
 
 All notable changes to this project are documented in this file.
 
+## v0.6.0
+
+- feat: release pass for the latest orchestrator/routing work now on `master`, including closed-loop self-iteration and history-based routing fixes
+- docs: refreshed package version for the current npm/GitHub release cycle
+
 ## v0.5.0
 
 - feat: learned routing now runs by default — `modelab run` without `--arms` calls `routeTaskV2` to auto-select the top 2 models using performance profiles + task type + history, instead of defaulting to the first 2 models
